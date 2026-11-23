@@ -54,6 +54,18 @@ def test_offset_line_is_perpendicular_to_heading():
   np.testing.assert_allclose(right[:, 1] - left[:, 1], [0.0, 0.0], atol=1e-12)
 
 
+def test_standstill_path_draws_nothing_instead_of_a_scribble():
+  rng = np.random.default_rng(0)
+  stopped = np.column_stack((np.abs(rng.normal(0, 0.02, 33)).cumsum() * 0.1, rng.normal(0, 0.003, 33), np.full(33, 1.2)))
+  left, right = offset_line(stopped, 0.9)  # the model's path at 0 mph spans a few centimetres of noise
+  assert len(left) == len(right) == 0
+  creeping = np.column_stack((np.linspace(0.0, 3.0, 33) ** 1.5, rng.normal(0, 0.003, 33), np.full(33, 1.2)))
+  left, right = offset_line(creeping, 0.9)
+  widths = np.linalg.norm(right[:, :2] - left[:, :2], axis=1)
+  np.testing.assert_allclose(widths, 1.8, atol=1e-6)
+  assert np.all(np.abs(right[:, 1] - left[:, 1]) > 1.7)  # still offset sideways, not in random directions
+
+
 def test_ground_disc_strip_covers_every_rim_point():
   disc = ground_disc((10.0, 0.0, 1.2), 1.0, segments=20)
   assert len(disc) == 20 and len({tuple(p) for p in disc}) == 20

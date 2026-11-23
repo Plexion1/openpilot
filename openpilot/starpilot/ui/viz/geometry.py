@@ -92,11 +92,35 @@ def pinhole(rect: tuple[float, float, float, float], vertical_fov_deg: float, ce
   return np.array([[f, 0.0, x + w * center[0]], [0.0, f, y + h * center[1]], [0.0, 0.0, 1.0]])
 
 
+MIN_SEGMENT = 0.25  # m; closer points carry only model noise, and their heading flips randomly
+
+
+def thin_line(points: np.ndarray, min_segment: float = MIN_SEGMENT) -> np.ndarray:
+  """Drop points closer than ``min_segment`` (ground distance) to the previous kept one.
+
+  At a standstill the predicted path collapses to a few centimetres of noisy points; offsetting those along their
+  heading would scribble a star-shaped ribbon around the car.
+  """
+  if len(points) < 2:
+    return points
+  keep = [0]
+  last = points[0, :2]
+  for i in range(1, len(points)):
+    if math.hypot(points[i, 0] - last[0], points[i, 1] - last[1]) >= min_segment:
+      keep.append(i)
+      last = points[i, :2]
+  return points[keep]
+
+
 def offset_line(points: np.ndarray, half_width: float) -> tuple[np.ndarray, np.ndarray]:
-  """Left/right edges of a ground ribbon around a near-to-far polyline, offset perpendicular to its heading."""
+  """Left/right edges of a ground ribbon around a near-to-far polyline, offset perpendicular to its heading.
+
+  Both chains come back empty when the line is shorter than one usable segment.
+  """
+  points = thin_line(points)
   n = len(points)
   if n < 2:
-    return points.copy(), points.copy()
+    return points[:0].copy(), points[:0].copy()
   tangent = np.empty((n, 2))
   tangent[1:-1] = points[2:, :2] - points[:-2, :2]
   tangent[0] = points[1, :2] - points[0, :2]
