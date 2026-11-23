@@ -14,6 +14,7 @@ from openpilot.selfdrive.ui.onroad.cameraview import CameraView
 from openpilot.system.ui.lib.application import gui_app
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, DeviceCameraConfig, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
+from openpilot.starpilot.ui.viz import controller as scene_views
 
 OpState = log.SelfdriveState.OpenpilotState
 CALIBRATED = log.ExtrinsicsCalibration.Status.calibrated
@@ -56,6 +57,8 @@ class AugmentedRoadView(CameraView):
     """Draw the existing calibrated camera/model without stock HUD or alert."""
     if not ui_state.started and ui_state.replay_clock is None:
       return
+    if scene_views.render_layer(self, rect, camera_view=camera_view, reverse_driver=reverse_driver, poll_camera=poll_camera):
+      return
     if poll_camera and (camera_view == CAMERA_VIEW_DRIVER or reverse_driver):
       self._ensure_connection()
     target = self._switch_stream_if_needed(ui_state.sm, camera_view, reverse_driver)
@@ -78,6 +81,7 @@ class AugmentedRoadView(CameraView):
     gui_app.measure_frame_phase("camera", CameraView._render, self, rect, poll_camera=poll_camera)
     if target != DRIVER_CAM:
       gui_app.measure_frame_phase("model", self.model_renderer.render, rect)
+      scene_views.render_controls(rect, poll_camera=poll_camera)
 
   def render_model_source_layer(self, rect: rl.Rectangle, *, show_long_indicator: bool | None = False) -> None:
     self._hud_renderer._draw_model_source(rect)

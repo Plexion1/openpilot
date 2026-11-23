@@ -103,6 +103,7 @@ from openpilot.system.ui.lib.application import MouseEvent, MousePos, gui_app
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.list_view import button_item, text_item, toggle_item
 from openpilot.starpilot.ui.compact_settings_page import StarCompactSettings as StarCompactSettings
+from openpilot.starpilot.ui.viz import controller as scene_views
 
 NATIVE_SETTINGS_PANELS = (Destination.DEVICE, Destination.SOFTWARE, Destination.BLUETOOTH, Destination.TOGGLES, Destination.DEVELOPER)
 _FEATURE_SETTINGS_PANES = {
@@ -1888,6 +1889,9 @@ class StarShellPage(Widget):
     handled = self.session.release(self.mode, mouse_pos.x - self.rect.x, mouse_pos.y - self.rect.y, timestamp=self._touch_time)
     bookmark_handled = (self.mode == ShellMode.ONROAD and self.session.profile == Profile.COMPACT and
                         self.session.camera_owner._bookmark_icon.interacting())
+    if (not handled and not self._dragged and self.mode == ShellMode.ONROAD and self.session.profile == Profile.LARGE and
+        scene_views.handle_tap(mouse_pos.x - self.rect.x, mouse_pos.y - self.rect.y)):
+      handled = True
     if not handled and not self._dragged and not bookmark_handled and self.on_background_tap is not None:
       self.on_background_tap()
     self._press_pos = None
