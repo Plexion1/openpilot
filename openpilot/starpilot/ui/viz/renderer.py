@@ -29,6 +29,7 @@ UNIFORM_VEC4 = rl.ShaderUniformDataType.SHADER_UNIFORM_VEC4
 
 MAX_LINE_DISTANCE = 120.0  # m, like the stock renderer's draw distance cap with some extra for the top view
 PATH_HALF_WIDTH = 0.9      # m, stock path width
+MIN_PATH_LENGTH = 1.5      # m; when stopped the predicted path is a few centimetres long and would draw as a sliver
 
 # Stock path colours (model_renderer.THROTTLE_COLORS / NO_THROTTLE_COLORS), bottom to top of the layer.
 THROTTLE = ((13, 248, 122, 102), (114, 255, 92, 89), (114, 255, 92, 0))
@@ -303,7 +304,8 @@ class VizRenderer:
     # The path stops at the lead's rear bumper instead of running underneath it.
     end = MAX_LINE_DISTANCE if not scene.leads else max(RADAR_TO_CAMERA + scene.leads[0].d_rel - 0.5, 0.0)
     path = clip_line(scene.path, end) if len(scene.path) > 1 else scene.path
-    path_edges = offset_line(path, PATH_HALF_WIDTH) if len(path) > 1 else None
+    long_enough = len(path) > 1 and path[-1, 0] - path[0, 0] >= MIN_PATH_LENGTH
+    path_edges = offset_line(path, PATH_HALF_WIDTH) if long_enough else None
     self._ribbon_key, self._ribbon_cache = key, _Ribbons(lines, path, path_edges)
     return self._ribbon_cache
 
