@@ -165,6 +165,8 @@ class OnroadView:
       self.jetlink_status = JetlinkStatusWidget(fonts)
       from openpilot.starpilot.ui.onroad_signal import SignalWidget
       self.network_signal = SignalWidget(fonts)
+      self.turn_signal_arrows = scene_widgets.TurnSignalArrows()
+      self.scene_view_buttons = scene_widgets.SceneViewButtons(fonts)
     else:
       self.compact_hud = CompactHudRenderer(fonts, asset_directory)
       self.compact_sidebar = MiciSidebarWidgets(fonts)
@@ -337,8 +339,10 @@ class OnroadView:
           submit("torque_bar", lambda: self.torque_bar.render(content, state, width if self.projection_viewport else 2160))
         if state.stopped_duration_s is not None:
           submit(STOPPED_TIMER_WIDGET, lambda: self._stopped_timer(state, state.stopped_duration_s))
-      submit(scene_widgets.TURN_SIGNAL_WIDGET, lambda: scene_widgets.render_turn_signals(state, width - 1860))
-      submit(scene_widgets.SWITCHER_WIDGET, lambda: scene_widgets.render_switcher(state, width - 1860, self.fonts))
+      if arrows := getattr(self, "turn_signal_arrows", None):
+        submit("turn_signals", lambda: arrows.render(state, width - 1860))
+      if buttons := getattr(self, "scene_view_buttons", None):
+        submit("scene_view_switcher", lambda: buttons.render(state, width - 1860))
     else:
       submit("nav_card", lambda: self.navigation.render(state))
       if state.alert.size == AlertSize.NONE and not driver_camera:
@@ -441,8 +445,10 @@ class OnroadView:
         self._driving_mode(state, right_shift / 2)
         self._clock(state, right_shift / 2)
         self._weather(state, right_shift / 2)
-        scene_widgets.render_turn_signals(state, right_shift)
-        scene_widgets.render_switcher(state, right_shift, self.fonts)
+        if arrows := getattr(self, "turn_signal_arrows", None):
+          arrows.render(state, right_shift)
+        if buttons := getattr(self, "scene_view_buttons", None):
+          buttons.render(state, right_shift)
         if exit_layer := getattr(self, "projection_exit_layer", None):
           exit_layer(state)
       if not ordered and manual_slc_confirmation(self.fonts.profile, state):

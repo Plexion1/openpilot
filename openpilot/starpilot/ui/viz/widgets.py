@@ -46,6 +46,23 @@ def widget_specs() -> dict[str, dict]:
   }
 
 
+class TurnSignalArrows:
+  """The turn_signals widget, owned by OnroadView like StarPilot's other widgets."""
+
+  def render(self, state, extra_width: float) -> None:
+    render_turn_signals(state, extra_width)
+
+
+class SceneViewButtons:
+  """The scene_view_switcher widget (VIEW / MODE buttons), owned by OnroadView like StarPilot's other widgets."""
+
+  def __init__(self, fonts=None):
+    self.fonts = fonts
+
+  def render(self, state, extra_width: float) -> None:
+    render_switcher(state, extra_width, self.fonts)
+
+
 def _position(state, key: str, extra_width: float):
   layout = state.customization["layouts"].get("large", {}).get(key)
   if layout is None or not layout.get("enabled"):

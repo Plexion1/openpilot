@@ -127,7 +127,8 @@ def test_renderer_dispatches_each_widget_in_saved_order(profile, viewport):
   view._weather = lambda *args: seen.append('weather')
   view._stopped_timer = lambda *args: seen.append(STOPPED_TIMER_WIDGET)
   for attr, key in [('unified_speed', 'cruise_limits'), ('current_speed', 'current_speed'), ('cem_gauge', 'cem_gauge'),
-                    ('steering_wheel', 'steering_wheel'), ('torque_bar', 'torque_bar')]:
+                    ('steering_wheel', 'steering_wheel'), ('torque_bar', 'torque_bar'),
+                    ('turn_signal_arrows', 'turn_signals'), ('scene_view_buttons', 'scene_view_switcher')]:
     setattr(view, attr, NS(render=lambda *args, key=key: seen.append(key)))
   view.compact_hud = NS(_speed_limit_sign=lambda state: seen.append('speed_limit'),
                         render_max_speed=lambda state: seen.append('max_speed'),
