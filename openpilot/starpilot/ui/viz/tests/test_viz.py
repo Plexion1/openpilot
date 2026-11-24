@@ -353,3 +353,131 @@ def test_gpu_guard_backs_off_when_the_model_drops_frames(tmp_path):
   assert views._paused_until > 0
   assert not views.render(None, None, sm, camera_view=2, reverse_driver=False, poll_camera=False, started_frame=0, status="engaged",
                           color_strength=1.0, projection=False)
+
+
+class _FakeGL:
+  """The few raylib calls the controller makes around the offscreen image, recorded instead of drawn."""
+
+  def __init__(self, monkeypatch):
+    from openpilot.starpilot.ui.raylib import rl
+    self.drawn = []
+    texture = SimpleNamespace(width=1050, height=510, id=1)
+    for name in ("begin_texture_mode", "end_texture_mode", "clear_background", "set_texture_filter", "unload_render_texture", "end_shader_mode"):
+      monkeypatch.setattr(rl, name, lambda *a, **k: None)
+    monkeypatch.setattr(rl, "load_render_texture", lambda w, h: SimpleNamespace(id=1, texture=SimpleNamespace(width=w, height=h, id=1)))
+    monkeypatch.setattr(rl, "draw_texture_pro", lambda *a, **k: self.drawn.append("image"))
+    self.texture = texture
+
+
+def _render(views, sm):
+  from openpilot.starpilot.ui.raylib import rl
+  return views.render(None, rl.Rectangle(30, 30, 2100, 1020), sm, camera_view=2, reverse_driver=False, poll_camera=False,
+                      started_frame=0, status="engaged", color_strength=1.0, projection=False)
+
+
+def test_switching_on_shows_the_stock_layer_for_one_frame_then_the_offscreen_image(tmp_path, monkeypatch):
+  from openpilot.starpilot.ui.viz import controller
+  gl = _FakeGL(monkeypatch)
+  store = SelectionStore(tmp_path / "scene_views.json", poll_interval=0.0)
+  store.set(VizSelection(ViewAngle.CHASE, VizMode.SYNTHETIC))
+  views = controller.SceneViews(store)
+  views.prepare_step = True
+  rendered = []
+  monkeypatch.setattr(views, "_render", lambda job, out, scale: rendered.append(scale))
+  sm = _SM()
+  views.prepare()             # frame 1: nothing asked for yet
+  assert not _render(views, sm)  # the stock layer draws this one frame; nothing is drawn at full resolution
+  assert rendered == [] and gl.drawn == []
+  views.prepare()             # frame 2: the scene goes into the half resolution image
+  assert rendered == [controller.RENDER_SCALE]
+  assert _render(views, sm) and gl.drawn == ["image"]
+  store.set(VizSelection(ViewAngle.TOP, VizMode.SYNTHETIC))
+  views.prepare()
+  assert _render(views, sm)   # a new angle reuses the image of this frame's prepare step (one frame late at most)
+
+  direct = controller.SceneViews(store)  # no prepare step running (previews, tests): drawn directly
+  monkeypatch.setattr(direct, "_render", lambda job, out, scale: rendered.append(scale))
+  assert _render(direct, sm) and rendered[-1] is None
+
+
+def test_paused_guard_skips_the_frame_and_never_shows_a_stale_image(tmp_path, monkeypatch):
+  from openpilot.starpilot.ui.viz import controller
+  _FakeGL(monkeypatch)
+  store = SelectionStore(tmp_path / "scene_views.json", poll_interval=0.0)
+  store.set(VizSelection(ViewAngle.CHASE, VizMode.SYNTHETIC))
+  views = controller.SceneViews(store)
+  views.prepare_step = True
+  rendered = []
+  monkeypatch.setattr(views, "_render", lambda job, out, scale: rendered.append(scale))
+  sm = _SM()
+  _render(views, sm)
+  views._guard_step = len(controller.GUARD_SCALES) - 1  # already at the lowest resolution
+  sm.data["modelV2"].frameDropPerc = 8.0
+  views.prepare()
+  assert rendered == [] and views.paused and views._ready is None
+  assert not _render(views, sm)
+
+
+def test_warm_up_compiles_one_program_per_step_and_only_after_a_scene_view_was_used(tmp_path, monkeypatch):
+  from openpilot.starpilot.ui.viz import controller, renderer
+  compiled = []
+
+  class FakeProgram:
+    def __init__(self, fragment, names):
+      compiled.append(names)
+      self.valid = True
+
+  monkeypatch.setattr(renderer, "_Program", FakeProgram)
+  monkeypatch.setattr(renderer.rl, "gen_image_color", lambda *a: None)
+  monkeypatch.setattr(renderer.rl, "load_texture_from_image", lambda image: SimpleNamespace(id=1))
+  monkeypatch.setattr(renderer.rl, "unload_image", lambda image: None)
+  store = SelectionStore(tmp_path / "scene_views.json", poll_interval=0.0)
+  views = controller.SceneViews(store)
+  views.warm_up_allowed, views.warm_up_egl = (lambda: True), True
+  steps = []
+  for _ in range(6):
+    views._warm_next = 0.0
+    views.prepare()
+    steps.append(len(compiled))
+  assert steps == [0] * 6  # never used on this device: nothing is compiled
+  store.set(VizSelection(ViewAngle.CHASE, VizMode.SYNTHETIC))
+  steps = []
+  for _ in range(5):
+    views._warm_next = 0.0
+    views.prepare()
+    steps.append(len(compiled))
+  assert steps == [1, 2, 3, 3, 3] and views._warm  # ground, vehicles, camera: one per step, then done
+
+
+def test_lead_info_is_drawn_above_the_3d_lead_like_the_stock_marker(tmp_path):
+  from openpilot.starpilot.ui.appearance_preferences import LeadInfoMode
+  from openpilot.starpilot.ui.viz import controller
+  views = controller.SceneViews(SelectionStore(tmp_path / "scene_views.json", poll_interval=0.0))
+  sm = _SM(lead_one=(30.0, 0.0))
+  scene = SceneTracker().update(sm)
+  camera = RIGS[ViewAngle.CHASE].camera(RigContext(RECT, scene, None, 0.05))
+  job = SimpleNamespace(sm=sm, lead_display=(True, LeadInfoMode.DISTANCE, False))
+  text, (x, y), (below_x, below_y) = views._lead_text(job, scene, camera)
+  assert text == "98 ft"  # StarPilot's own format_lead_info for 30 m
+  lead_x, lead_y, _ = camera.project_point(scene.leads[0].rear)
+  assert abs(x - lead_x) < 40 and y < lead_y < below_y  # centred over the lead: above its roof, or under its bumper
+  job.lead_display = (True, LeadInfoMode.SPEED, True)
+  assert views._lead_text(job, scene, camera)[0].endswith("km/h")
+  for display in (None, (True, LeadInfoMode.OFF, False), (False, LeadInfoMode.DISTANCE, False)):
+    job.lead_display = display
+    assert views._lead_text(job, scene, camera) is None  # Lead Info off: nothing, as on the stock view
+
+
+def test_top_view_keeps_the_lead_below_the_speed_and_cruise_widgets():
+  from openpilot.starpilot.ui.viz.controller import LABEL_TOP_BAND
+  from openpilot.starpilot.ui.viz.rigs import TopDownRig
+  rig = RIGS[ViewAngle.TOP]
+  for distance in (10.0, 25.0, 40.0):
+    sm = _SM(lead_one=(distance, 0.0))
+    scene = SceneTracker().update(sm)
+    rig.reset()
+    camera = rig.camera(RigContext(RECT, scene, None, 0.05))
+    lead = scene.leads[0]
+    front = camera.project_point(lead.rear + np.array([4.6, 0.0, 0.0]))
+    assert front[1] > RECT[1] + RECT[3] * (1.0 - TopDownRig.content_top) - 1.0, distance
+    assert front[1] > RECT[1] + RECT[3] * LABEL_TOP_BAND, distance  # clear of the widgets at the top of the screen

@@ -178,18 +178,26 @@ class VizRenderer:
   # ---- resources
 
   def _ensure(self) -> None:
+    while not self._compile_next():
+      pass
+    if not self._synthetic.valid:
+      raise RuntimeError("scene views: synthetic ground shader failed to compile")
+
+  def _compile_next(self) -> bool:
+    """Create the next missing resource (one shader compile at most); True when the always-needed ones exist."""
     if self._white is None:
       image = rl.gen_image_color(1, 1, rl.WHITE)
       self._white = rl.load_texture_from_image(image)
       rl.unload_image(image)
     if self._synthetic is None:
       self._synthetic = _Program(shaders.SYNTHETIC_GROUND_SHADER, GROUND_UNIFORMS)
-      if not self._synthetic.valid:
-        raise RuntimeError("scene views: synthetic ground shader failed to compile")
+      return False
     if self._vehicle is None:
       self._vehicle = _Program(shaders.VEHICLE_SHADER, VEHICLE_UNIFORMS)
       if not self._vehicle.valid:
         cloudlog.error("scene views: vehicle shader failed to compile, vehicles are hidden")
+      return False
+    return True
 
   def _camera_program(self, egl: bool) -> _Program | None:
     """None when this GPU could not compile it; camera modes then fall back to the synthetic ground."""
@@ -205,10 +213,9 @@ class VizRenderer:
     return program if program.valid else None
 
   def warm_up(self, egl: bool | None) -> bool:
-    """Compile one missing program (they take a while on first use); True once all are ready. ``egl`` None skips the
-    camera program (no camera frame format known yet)."""
-    if self._synthetic is None or self._vehicle is None or self._white is None:
-      self._ensure()
+    """Compile one missing program per call (they take a while on first use); True once all are ready. ``egl`` None
+    skips the camera program (no camera frame format known yet)."""
+    if not self._compile_next():
       return False
     if egl is not None and egl not in self._camera:
       self._camera_program(egl)

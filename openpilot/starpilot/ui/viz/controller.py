@@ -21,6 +21,7 @@ scene and its drawing as "model", so slow frame diagnostics compare directly.
 """
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -45,6 +46,7 @@ GUARD_DROP_PERCENT = 2.0  # modelV2.frameDropPerc (a filtered percentage; 0 when
 GUARD_SETTLE = 6.0        # s between steps, so the filtered drop rate can respond to the previous one
 GUARD_PAUSE = 60.0        # s of stock view once the lowest resolution was not enough
 
+LABEL_TOP_BAND = 0.28     # top of the layer where StarPilot's speed and cruise widgets sit: lead labels avoid it
 WARM_UP_DELAY = 10.0      # s after UI start before shaders are compiled (offroad, once a scene view has been used)
 WARM_UP_SPACING = 1.0     # s between programs, so the offroad UI never stalls for long
 
@@ -73,6 +75,7 @@ class _Job:
   road_style: dict | None
   stop_sign: tuple | None
   clock: Any
+  lead_display: tuple | None = None
 
 
 class SceneViews:
@@ -91,6 +94,7 @@ class SceneViews:
     self._prepared_serial = -1  # job serial the last prepare consumed
     self._prepare_seen = -1    # job serial at the last prepare call (prepare runs every frame when installed)
     self._ready: tuple | None = None  # (selection, rect) of the offscreen image drawn by this frame's prepare
+    self._lead_label: tuple | None = None  # (text, x, y) for that image: StarPilot's Lead Info above the lead
     self._target = None
     self._guard_step = 0
     self._guard_next = 0.0     # monotonic time of the next allowed step
@@ -111,10 +115,11 @@ class SceneViews:
 
   def render(self, view, rect: rl.Rectangle, sm, *, camera_view: int, reverse_driver: bool, poll_camera: bool,
              started_frame: int, status: str, color_strength, projection: bool, road_style: dict | None = None,
-             stop_sign: tuple | None = None, now: float | None = None, clock=None) -> bool:
+             stop_sign: tuple | None = None, now: float | None = None, clock=None, lead_display: tuple | None = None) -> bool:
     """Draw the selected scene view. Returns False when the stock camera/model layer should draw instead.
 
     ``stop_sign`` is StarPilot's own confirmed STOP sighting (scene.stop_sign_sighting), passed through unchanged.
+    ``lead_display`` is the camera layer's (show lead, Lead Info mode, metric): its text is drawn above the lead.
     ``now`` / ``clock`` give StarPilot's display clock in seconds (live: monotonic; replay: the recording's time), so
     motion, fades and blinking follow a replay's pace and pauses; without them the monotonic clock is used.
     """
@@ -130,7 +135,7 @@ class SceneViews:
     key = (selection, (rect.x, rect.y, rect.width, rect.height))
     self._job_serial += 1
     self._job = _Job(view, key[1], sm, selection, camera_view, reverse_driver, poll_camera, started_frame, status,
-                     color_strength, road_style, stop_sign, clock or ((lambda: now) if now else None))
+                     color_strength, road_style, stop_sign, clock or ((lambda: now) if now else None), lead_display)
     try:
       if self._ready is not None and self._target is not None:
         # this frame's offscreen image (the previous angle or mode for one frame right after a switch)
@@ -138,10 +143,12 @@ class SceneViews:
         texture = self._target.texture
         rl.draw_texture_pro(texture, rl.Rectangle(0, 0, float(texture.width), -float(texture.height)), rect, rl.Vector2(0, 0), 0.0,
                             rl.WHITE)
+        self._draw_lead_label(rect)
         return True
       if self.prepare_step and self._job_serial - self._prepare_seen <= 2:
         return False  # just switched on: the stock layer covers this one frame, the next prepare step draws the scene
       self._render(self._job, rect, None)  # no prepare step running (previews, tests): draw directly at full resolution
+      self._draw_lead_label(rect)
     except Exception:
       self._fail("render failed")
       return False
@@ -251,6 +258,7 @@ class SceneViews:
       r = job.rect
       front = stock_front_camera(source.intrinsics, source.view_from_calib, r, source.wide) if rig.needs_front else None
       camera = rig.camera(RigContext(r, scene, front, dt))
+      self._lead_label = self._lead_text(job, scene, camera)  # layer pixels: drawn sharp over the stretched image
       if scale is not None:
         camera = camera.reframed(r, scale)
       strength = 1.0
@@ -259,6 +267,51 @@ class SceneViews:
       self.renderer.render(out, rig, camera, scene, selection.mode, dt=dt, style=self.store.style(), road_style=job.road_style,
                            frame=frame, source=source, color_strength=strength, status=job.status, blink_time=now)
     _phase("model", scene_work)
+
+  def _lead_text(self, job: _Job, scene, camera) -> tuple | None:
+    """StarPilot's Lead Info (distance or speed, as on the stock lead marker): its text and the screen points just above
+    the lead's roof and just below its rear bumper (layer pixels; None where behind the camera)."""
+    display = job.lead_display
+    if display is None or not display[0] or not scene.valid or not scene.leads or not scene.leads[0].primary:
+      return None
+    from openpilot.starpilot.ui.appearance_preferences import format_lead_info
+    from openpilot.starpilot.ui.viz.renderer import VEHICLE_MODELS
+    sm = job.sm
+    radar = sm["radarState"] if sm.seen["radarState"] and sm.valid["radarState"] else None
+    text = format_lead_info(radar.leadOne if radar is not None else None, display[1], display[2])
+    if not text:
+      return None
+    lead = scene.leads[0]
+    _model, (length, _width, height), _wheel, _gloss = VEHICLE_MODELS[self.store.style().lead.model]
+    c, s = math.cos(lead.heading), math.sin(lead.heading)
+    x, y, z = float(lead.rear[0]), float(lead.rear[1]), float(lead.rear[2])
+    roof = camera.project_point((x + c * length / 2, y + s * length / 2, z - height - 0.25))
+    bumper = camera.project_point((x - c * 0.3, y - s * 0.3, z))
+    if roof is None:
+      return None
+    return text, roof[:2], bumper[:2] if bumper is not None else None
+
+  def _draw_lead_label(self, rect: rl.Rectangle) -> None:
+    """Like the stock marker's Lead Info: semi-bold 48 px, white with a thin black outline, kept inside the layer. It
+    sits above the lead, or below it where that would cover the speed and cruise widgets at the top of the screen."""
+    label = self._lead_label
+    if label is None:
+      return
+    text, (x, roof_y), bumper = label
+    if not (rect.x <= x <= rect.x + rect.width and rect.y <= roof_y <= rect.y + rect.height):
+      return
+    from openpilot.system.ui.lib.application import FontWeight, gui_app
+    from openpilot.system.ui.lib.text_measure import measure_text_cached
+    font = gui_app.font(FontWeight.SEMI_BOLD)
+    size = measure_text_cached(font, text, 48)
+    y = roof_y - size.y - 6
+    if y < rect.y + rect.height * LABEL_TOP_BAND and bumper is not None:
+      x, y = bumper[0], bumper[1] + 8
+    x = min(max(x - size.x / 2, rect.x), rect.x + rect.width - size.x)
+    y = min(max(y, rect.y), rect.y + rect.height - size.y)
+    for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+      rl.draw_text_ex(font, text, rl.Vector2(x + dx, y + dy), 48, 0, rl.BLACK)
+    rl.draw_text_ex(font, text, rl.Vector2(x, y), 48, 0, rl.WHITE)
 
   def render_switcher(self, x: float, y: float, fill=None, border=None, text=None, fonts=None) -> None:
     if self.failed:
@@ -327,14 +380,14 @@ def install() -> None:
 
 
 def render_layer(view, rect: rl.Rectangle, *, camera_view: int, reverse_driver: bool, poll_camera: bool,
-                 road_style: dict | None = None) -> bool:
+                 road_style: dict | None = None, lead_display: tuple | None = None) -> bool:
   """AugmentedRoadView hook. True when a scene view was drawn instead of the stock layer."""
   from openpilot.selfdrive.ui.ui_state import ui_state
   from openpilot.starpilot.ui.camera_color import road_color_strength
   return shared().render(view, rect, ui_state.sm, camera_view=camera_view, reverse_driver=reverse_driver, poll_camera=poll_camera,
                          started_frame=ui_state.started_frame, status=ui_state.status.value,
                          color_strength=lambda: road_color_strength(ui_state), projection=projecting(), road_style=road_style,
-                         stop_sign=noted_stop_sign(), clock=lambda: ui_state.display_time_ns() / 1e9)
+                         stop_sign=noted_stop_sign(), clock=lambda: ui_state.display_time_ns() / 1e9, lead_display=lead_display)
 
 
 def projecting() -> bool:

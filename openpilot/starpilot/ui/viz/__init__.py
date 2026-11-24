@@ -3,7 +3,8 @@
 Angles (rigs.py)
   Front  the road camera's own view, framed exactly like the stock onroad view
   Chase  above and behind the car, locked to its heading; eases back a little with speed
-  Top    straight down, car near the bottom; zooms out with speed so the lead stays in view
+  Top    straight down, car near the bottom; zooms out with speed so the lead stays in view, below StarPilot's speed
+         and cruise widgets at the top of the screen
 
 Modes (renderer.py MODE_STYLES, shaders.py)
   Camera     live video. Front + Camera is the unmodified StarPilot view; Chase and Top reproject the main road camera
@@ -25,6 +26,7 @@ What the scene shows
     on the road from our own travel; nothing is detected or matched again. In the top view it lies flat like a map
     marker
   * the path in StarPilot's path style (acceleration, solid colour or rainbow) and custom lane line colours
+  * StarPilot's Lead Info (distance or speed) above the lead, as on the stock lead marker, kept clear of the speed
   * our engagement status as a soft glow under the car
 
 How it hooks into StarPilot (a few lines in existing files)

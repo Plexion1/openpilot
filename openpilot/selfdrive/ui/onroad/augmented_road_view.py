@@ -58,7 +58,7 @@ class AugmentedRoadView(CameraView):
     if not ui_state.started and ui_state.replay_clock is None:
       return
     if scene_views.render_layer(self, rect, camera_view=camera_view, reverse_driver=reverse_driver, poll_camera=poll_camera,
-                                road_style=road_style):
+                                road_style=road_style, lead_display=lead_display):
       return
     if poll_camera and (camera_view == CAMERA_VIEW_DRIVER or reverse_driver):
       self._ensure_connection()

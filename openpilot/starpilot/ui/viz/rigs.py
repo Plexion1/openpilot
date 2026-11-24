@@ -117,8 +117,11 @@ class TopDownRig(Rig):
   angle = ViewAngle.TOP
   altitude = 60.0      # m; high and narrow so it reads as a map rather than a wide-angle shot
   behind = 6.0         # m of road shown behind the car's centre
-  min_ahead, max_ahead = 18.0, 55.0
+  min_ahead, max_ahead = 18.0, 80.0
   zoom_time = 1.5      # s, smoothing time constant for zoom changes
+  # The top of the screen holds StarPilot's speed and cruise widgets: keep the lead and the stop sign below them, at
+  # most this far up the layer.
+  content_top = 0.68
   lane_half_width = 0.1
   edge_half_width = 0.09
   stop_curtain = False
@@ -132,10 +135,14 @@ class TopDownRig(Rig):
 
   def ahead(self, scene: Scene, dt: float) -> float:
     target = 12.0 + 0.9 * max(scene.v_ego, 0.0)
+    ego_x = scene.ego_ground[0]
+    shown = []  # how far ahead of our car's centre each thing to keep in view ends
     if scene.leads:
-      target = max(target, scene.leads[0].rear[0] + 8.0 - scene.ego_ground[0])
+      shown.append(scene.leads[0].rear[0] + 5.0 - ego_x)
     if scene.stop_sign is not None and scene.stop_sign.position[0] > 0.0:
-      target = max(target, scene.stop_sign.position[0] + 4.0 - scene.ego_ground[0])
+      shown.append(scene.stop_sign.position[0] + 1.5 - ego_x)
+    for end in shown:
+      target = max(target, (end + self.behind) / self.content_top - self.behind)
     target = float(np.clip(target, self.min_ahead, self.max_ahead))
     self._ahead = _smooth(self._ahead, target, dt, self.zoom_time)
     return self._ahead
