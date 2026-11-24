@@ -93,6 +93,11 @@ class SceneViews:
   def selection(self) -> VizSelection:
     return self.store.get()
 
+  @property
+  def paused(self) -> bool:
+    """The GPU guard is showing the stock view for a while."""
+    return time.monotonic() < self._paused_until
+
   def render(self, view, rect: rl.Rectangle, sm, *, camera_view: int, reverse_driver: bool, poll_camera: bool,
              started_frame: int, status: str, color_strength, projection: bool, road_style: dict | None = None,
              stop_sign: tuple | None = None, now: float | None = None, clock=None) -> bool:
@@ -103,7 +108,7 @@ class SceneViews:
     motion, fades and blinking follow a replay's pace and pauses; without them the monotonic clock is used.
     """
     self._job = None
-    if self.failed or projection or time.monotonic() < self._paused_until:
+    if self.failed or projection or self.paused:
       return False
     selection = self.store.get()
     if selection.stock or camera_view in (CAMERA_VIEW_DRIVER, CAMERA_VIEW_NONE) or reverse_driver:
@@ -226,7 +231,7 @@ class SceneViews:
     if self.failed:
       return
     try:
-      self.controls.render(x, y, self.store.get(), fill, border, text, fonts=fonts)
+      self.controls.render(x, y, self.store.get(), fill, border, text, fonts=fonts, paused=self.paused)
     except Exception:
       cloudlog.exception("scene views: switcher failed")
       self.failed = True

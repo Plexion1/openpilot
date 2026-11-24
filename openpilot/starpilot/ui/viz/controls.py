@@ -42,8 +42,9 @@ class VizControls:
     return {"angle": rl.Rectangle(x, y, WIDTH, HEIGHT), "mode": rl.Rectangle(x, y + HEIGHT + GAP, WIDTH, HEIGHT)}
 
   def render(self, x: float, y: float, selection: VizSelection, fill: rl.Color | None = None,
-             border: rl.Color | None = None, text: rl.Color | None = None, *, fonts=None) -> None:
-    """``fonts`` is the onroad view's BitmapFonts, so the labels match the rest of the HUD."""
+             border: rl.Color | None = None, text: rl.Color | None = None, *, fonts=None, paused: bool = False) -> None:
+    """``fonts`` is the onroad view's BitmapFonts, so the labels match the rest of the HUD. ``paused``: the GPU guard
+    is showing the stock view for a while (see controller.GUARD_*)."""
     self._targets = self.layout(x, y)
     self._drawn_at = time.monotonic()
     font = fonts if fonts is not None else _font()
@@ -56,7 +57,10 @@ class VizControls:
       rl.draw_rectangle_rounded(box, 0.45, 12, fill)
       if border.a:
         rl.draw_rectangle_rounded_lines_ex(box, 0.45, 12, 3, border)
-      self._text(font, caption, 30, box.x + box.width / 2, box.y + 26, caption_color)
+      if paused and not selection.stock:
+        self._text(font, "PAUSED", 30, box.x + box.width / 2, box.y + 26, rl.Color(255, 176, 32, 255))
+      else:
+        self._text(font, caption, 30, box.x + box.width / 2, box.y + 26, caption_color)
       self._text(font, value, 44, box.x + box.width / 2, box.y + 68, text)
 
   @staticmethod
