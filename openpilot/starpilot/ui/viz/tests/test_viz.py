@@ -468,3 +468,53 @@ def test_top_view_keeps_the_lead_below_the_speed_and_cruise_widgets():
     front = camera.project_point(lead.rear + np.array([4.6, 0.0, 0.0]))
     assert front[1] > RECT[1] + RECT[3] * (1.0 - TopDownRig.content_top) - 1.0, distance
     assert front[1] > RECT[1] + RECT[3] * LABEL_TOP_BAND, distance  # clear of the widgets at the top of the screen
+
+
+def test_a_corrupted_settings_file_falls_back_to_the_stock_view(tmp_path):
+  from openpilot.starpilot.ui.viz import controller
+  from openpilot.starpilot.ui.viz.options import parse_selection, parse_style
+  assert parse_selection({"angle": ["chase"], "mode": {"x": 1}}) == VizSelection()
+  assert parse_style({"egoModel": [], "egoColor": {}, "leadModel": 3, "leadColor": None}) == parse_style({})
+  path = tmp_path / "scene_views.json"
+  path.write_text(json.dumps({"angle": ["chase"], "mode": 7, "egoColor": []}))
+  views = controller.SceneViews(SelectionStore(path, poll_interval=0.0))
+  assert not views.render(None, None, _SM(), camera_view=2, reverse_driver=False, poll_camera=False, started_frame=0,
+                          status="engaged", color_strength=1.0, projection=False)
+  assert not views.failed  # defaults (the stock view), not a failure
+
+
+def test_saving_keeps_a_change_another_writer_made_since_the_last_read(tmp_path):
+  path = tmp_path / "scene_views.json"
+  device = SelectionStore(path, poll_interval=1e9)  # the UI's store, which only polls every few seconds
+  device.set(VizSelection(ViewAngle.CHASE, VizMode.SYNTHETIC))
+  galaxy = SelectionStore(path, poll_interval=0.0)
+  galaxy.get()
+  galaxy.update(egoColor="Racing Red")  # e.g. a settings row saved from Galaxy
+  device.set(device.get().next_angle())  # a tap right after, before the UI's next poll
+  saved = json.loads(path.read_text())
+  assert saved["egoColor"] == "Racing Red" and saved["angle"] == ViewAngle.TOP.value
+
+
+def test_leads_with_non_finite_radar_values_are_skipped():
+  scene = SceneTracker().update(_SM(lead_one=(float("nan"), 0.0), lead_two=(30.0, float("inf"))))
+  assert scene.valid and scene.leads == []
+
+
+def test_stop_sign_helper_never_raises_into_starpilots_snapshot():
+  assert stop_sign_sighting(SimpleNamespace(confirmed_ns=1, distance_m=20.0, previous=SimpleNamespace(boxes=[object()])), 0) is None
+  assert stop_sign_sighting(object(), 0) is None
+
+
+def test_each_scene_view_instance_owns_its_rigs(tmp_path):
+  from openpilot.starpilot.ui.viz import controller
+  a = controller.SceneViews(SelectionStore(tmp_path / "a.json"))
+  b = controller.SceneViews(SelectionStore(tmp_path / "b.json"))
+  assert a.rigs[ViewAngle.CHASE] is not b.rigs[ViewAngle.CHASE] and a.rigs[ViewAngle.TOP] is not RIGS[ViewAngle.TOP]
+
+
+def test_a_widget_error_hides_only_that_widget():
+  from openpilot.starpilot.ui.viz.widgets import TurnSignalArrows
+  arrows = TurnSignalArrows()
+  arrows.render(SimpleNamespace(), 300.0)  # a state without the fields it reads
+  assert arrows.failed
+  arrows.render(SimpleNamespace(), 300.0)  # stays quiet afterwards

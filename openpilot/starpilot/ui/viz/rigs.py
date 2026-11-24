@@ -158,4 +158,9 @@ class TopDownRig(Rig):
     return VirtualCamera(eye, top_down_rotation(), intrinsics)
 
 
-RIGS: dict[ViewAngle, Rig] = {rig.angle: rig for rig in (FrontRig(), ChaseRig(), TopDownRig())}
+def make_rigs() -> dict[ViewAngle, Rig]:
+  """A fresh set of rigs: they carry smoothing state, so each SceneViews instance owns its own."""
+  return {rig.angle: rig for rig in (FrontRig(), ChaseRig(), TopDownRig())}
+
+
+RIGS: dict[ViewAngle, Rig] = make_rigs()

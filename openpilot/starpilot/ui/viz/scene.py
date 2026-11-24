@@ -298,15 +298,16 @@ class SceneTracker:
     leads: list[Lead] = []
     for primary, data in ((True, radar_state.leadOne), (False, radar_state.leadTwo)):
       latch = self._lead_brakes[primary]
-      d_rel = float(data.dRel)
-      if not data.present or (not primary and leads and abs(d_rel - leads[0].d_rel) < SAME_LEAD_DISTANCE):
+      d_rel, y_rel = float(data.dRel), float(data.yRel)
+      v_lead, a_lead = float(data.vLead), float(data.aLeadK)
+      finite = all(math.isfinite(value) for value in (d_rel, y_rel, v_lead, a_lead))  # a NaN would blank the whole road
+      if not data.present or not finite or (not primary and leads and abs(d_rel - leads[0].d_rel) < SAME_LEAD_DISTANCE):
         latch.on = False
         continue
       x = RADAR_TO_CAMERA + d_rel
-      v_lead, a_lead = float(data.vLead), float(data.aLeadK)
       braking = latch.update(self._now, a_lead < LEAD_BRAKE_ON or v_lead < LEAD_STOPPED,
                              a_lead > LEAD_BRAKE_OFF and v_lead > LEAD_STOPPED + 0.3)
-      leads.append(Lead(rear=np.array([x, -float(data.yRel), scene.height]),  # radar y is left-positive
+      leads.append(Lead(rear=np.array([x, -y_rel, scene.height]),  # radar y is left-positive
                         heading=_heading(scene.path, x + 2.0), d_rel=d_rel, v_rel=float(data.vRel), v_lead=v_lead,
                         a_lead=a_lead, braking=braking, radar=bool(data.radar), primary=primary))
     return leads
@@ -331,17 +332,21 @@ def stop_sign_sighting(confirmation, now_ns: int) -> tuple[float, float, float, 
   Reuses StarPilot's own result: the distance it already computed and the box it already validated and matched;
   nothing is detected or matched again. across/up are the box centre's ray (x right, y down per unit depth).
   """
-  sample = getattr(confirmation, "previous", None)
-  if not getattr(confirmation, "confirmed_ns", 0) or confirmation.distance_m is None or sample is None or not sample.boxes:
-    return None
-  from openpilot.starpilot.speed_limits.vision.stop_observation import ROAD_FOCAL_PX, STOP_RANGE_OFFSET_M
-  focal = ROAD_FOCAL_PX.get((sample.width, sample.height))
-  if not focal:
-    return None
-  x1, y1, x2, y2 = max(sample.boxes, key=lambda box: box.confidence).bbox
-  age = min(max((now_ns - sample.observed_ns) / 1e9, 0.0), 1.5)
-  return (float(confirmation.distance_m) - STOP_RANGE_OFFSET_M, ((x1 + x2) / 2 - sample.width / 2) / focal,
-          ((y1 + y2) / 2 - sample.height / 2) / focal, age)
+  try:
+    sample = getattr(confirmation, "previous", None)
+    if not getattr(confirmation, "confirmed_ns", 0) or confirmation.distance_m is None or sample is None or not sample.boxes:
+      return None
+    from openpilot.starpilot.speed_limits.vision.stop_observation import ROAD_FOCAL_PX, STOP_RANGE_OFFSET_M
+    focal = ROAD_FOCAL_PX.get((sample.width, sample.height))
+    if not focal:
+      return None
+    x1, y1, x2, y2 = max(sample.boxes, key=lambda box: box.confidence).bbox
+    age = min(max((now_ns - sample.observed_ns) / 1e9, 0.0), 1.5)
+    sighting = (float(confirmation.distance_m) - STOP_RANGE_OFFSET_M, ((x1 + x2) / 2 - sample.width / 2) / focal,
+                ((y1 + y2) / 2 - sample.height / 2) / focal, age)
+  except (AttributeError, TypeError, ValueError, KeyError, ZeroDivisionError):
+    return None  # runs inside StarPilot's snapshot builder: an unexpected shape must never break it
+  return sighting if all(math.isfinite(value) for value in sighting) else None
 
 
 class StopSignTracker:

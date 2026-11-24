@@ -104,20 +104,22 @@ def default_path() -> Path:
   return starpilot_storage_root() / FILE_NAME
 
 
+def _choice(value, choices, fallback):
+  """``value`` when it is one of ``choices`` (a hand-edited or corrupted document may hold anything), else fallback."""
+  return value if isinstance(value, str) and value in choices else fallback
+
+
 def parse_selection(document: dict) -> VizSelection:
-  return VizSelection(
-    angle=ViewAngle(document["angle"]) if document.get("angle") in ViewAngle._value2member_map_ else ViewAngle.FRONT,
-    mode=VizMode(document["mode"]) if document.get("mode") in VizMode._value2member_map_ else VizMode.CAMERA,
-  )
+  return VizSelection(angle=ViewAngle(_choice(document.get("angle"), ViewAngle._value2member_map_, ViewAngle.FRONT)),
+                      mode=VizMode(_choice(document.get("mode"), VizMode._value2member_map_, VizMode.CAMERA)))
 
 
 def parse_style(document: dict) -> SceneStyle:
   default = SceneStyle()
 
   def look(prefix: str, fallback: VehicleLook) -> VehicleLook:
-    model, color = document.get(prefix + "Model"), document.get(prefix + "Color")
-    return VehicleLook(VehicleModel(model) if model in VehicleModel._value2member_map_ else fallback.model,
-                       color if color in COLORS else fallback.color)
+    return VehicleLook(VehicleModel(_choice(document.get(prefix + "Model"), VehicleModel._value2member_map_, fallback.model)),
+                       _choice(document.get(prefix + "Color"), COLORS, fallback.color))
   return SceneStyle(ego=look("ego", default.ego), lead=look("lead", default.lead))
 
 
@@ -152,7 +154,9 @@ class SelectionStore:
       self.update(angle=selection.angle.value, mode=selection.mode.value)
 
   def update(self, **fields) -> bool:
-    """Merge fields into the document and save it. False when it could not be written (it still applies until restart)."""
+    """Merge fields into the document and save it. False when it could not be written (it still applies until restart).
+    The file is re-read first, so a change another writer made since the last poll is kept."""
+    self._refresh()
     self._document.update(fields)
     self._selection, self._style = parse_selection(self._document), parse_style(self._document)
     try:

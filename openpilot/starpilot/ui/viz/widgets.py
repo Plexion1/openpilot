@@ -47,21 +47,36 @@ def widget_specs() -> dict[str, dict]:
   }
 
 
-class TurnSignalArrows:
+class _SafeWidget:
+  """An error while drawing is logged once and hides the widget for the rest of the session (never the whole HUD)."""
+  failed = False
+
+  def _draw(self, draw, *args) -> None:
+    if self.failed:
+      return
+    try:
+      draw(*args)
+    except Exception:
+      from openpilot.common.swaglog import cloudlog
+      cloudlog.exception(f"scene views: {type(self).__name__} failed, hiding it")
+      self.failed = True
+
+
+class TurnSignalArrows(_SafeWidget):
   """The turn_signals widget, owned by OnroadView like StarPilot's other widgets."""
 
   def render(self, state, extra_width: float) -> None:
-    render_turn_signals(state, extra_width)
+    self._draw(render_turn_signals, state, extra_width)
 
 
-class SceneViewButtons:
+class SceneViewButtons(_SafeWidget):
   """The scene_view_switcher widget (VIEW / MODE buttons), owned by OnroadView like StarPilot's other widgets."""
 
   def __init__(self, fonts=None):
     self.fonts = fonts
 
   def render(self, state, extra_width: float) -> None:
-    render_switcher(state, extra_width, self.fonts)
+    self._draw(render_switcher, state, extra_width, self.fonts)
 
 
 def _position(state, key: str, extra_width: float):

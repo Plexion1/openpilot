@@ -34,7 +34,7 @@ from openpilot.starpilot.ui.viz.camera_feed import CameraFeed
 from openpilot.starpilot.ui.viz.controls import VizControls
 from openpilot.starpilot.ui.viz.options import SelectionStore, VizMode, VizSelection
 from openpilot.starpilot.ui.viz.renderer import VizRenderer
-from openpilot.starpilot.ui.viz.rigs import RIGS, RigContext, stock_front_camera
+from openpilot.starpilot.ui.viz.rigs import RigContext, make_rigs, stock_front_camera
 from openpilot.starpilot.ui.viz.scene import SceneTracker, StopSignTracker, noted_stop_sign
 
 # AugmentedRoadView camera_view values (appearance CameraView param) that keep the stock layer.
@@ -83,6 +83,7 @@ class _Job:
 class SceneViews:
   def __init__(self, store: SelectionStore | None = None, render_scale: float = RENDER_SCALE):
     self.store = store or SelectionStore()
+    self.rigs = make_rigs()
     self.tracker = SceneTracker()
     self.stop_signs = StopSignTracker()
     self.renderer = VizRenderer()
@@ -129,16 +130,16 @@ class SceneViews:
     if self.failed or projection or self.paused:
       self._ready = None
       return False
-    selection = self.store.get()
-    if selection.stock or camera_view in (CAMERA_VIEW_DRIVER, CAMERA_VIEW_NONE) or reverse_driver:
-      self._last_time = None
-      self._ready = None
-      return False
-    key = (selection, (rect.x, rect.y, rect.width, rect.height))
-    self._job_serial += 1
-    self._job = _Job(view, key[1], sm, selection, camera_view, reverse_driver, poll_camera, started_frame, status,
-                     color_strength, road_style, stop_sign, clock or ((lambda: now) if now else None), lead_display)
     try:
+      selection = self.store.get()
+      if selection.stock or camera_view in (CAMERA_VIEW_DRIVER, CAMERA_VIEW_NONE) or reverse_driver:
+        self._last_time = None
+        self._ready = None
+        return False
+      self._job_serial += 1
+      self._job = _Job(view, (rect.x, rect.y, rect.width, rect.height), sm, selection, camera_view, reverse_driver,
+                       poll_camera, started_frame, status, color_strength, road_style, stop_sign,
+                       clock or ((lambda: now) if now else None), lead_display)
       if self._ready is not None and self._target is not None:
         # this frame's offscreen image (the previous angle or mode for one frame right after a switch)
         self._ready = None
@@ -181,6 +182,7 @@ class SceneViews:
         rl.clear_background(rl.BLACK)
         self._render(job, rl.Rectangle(0, 0, size[0], size[1]), self.render_scale)
       finally:
+        rl.end_shader_mode()  # a no-op unless drawing failed between a shader's begin and end
         rl.end_texture_mode()
       self._ready = (job.selection, job.rect)
     except Exception:
@@ -236,7 +238,7 @@ class SceneViews:
     self._last_time = now
     selection, sm = job.selection, job.sm
 
-    rig = RIGS[selection.angle]
+    rig = self.rigs[selection.angle]
     if rig.angle != self._angle:
       rig.reset()
       self._angle = rig.angle
@@ -383,13 +385,24 @@ def install() -> None:
 
 def render_layer(view, rect: rl.Rectangle, *, camera_view: int, reverse_driver: bool, poll_camera: bool,
                  road_style: dict | None = None, lead_display: tuple | None = None) -> bool:
-  """AugmentedRoadView hook. True when a scene view was drawn instead of the stock layer."""
-  from openpilot.selfdrive.ui.ui_state import ui_state
-  from openpilot.starpilot.ui.camera_color import road_color_strength
-  return shared().render(view, rect, ui_state.sm, camera_view=camera_view, reverse_driver=reverse_driver, poll_camera=poll_camera,
-                         started_frame=ui_state.started_frame, status=ui_state.status.value,
-                         color_strength=lambda: road_color_strength(ui_state), projection=projecting(), road_style=road_style,
-                         stop_sign=noted_stop_sign(), clock=lambda: ui_state.display_time_ns() / 1e9, lead_display=lead_display)
+  """AugmentedRoadView hook. True when a scene view was drawn instead of the stock layer; any error keeps the stock one."""
+  global _hook_failed
+  if _hook_failed:
+    return False
+  try:
+    from openpilot.selfdrive.ui.ui_state import ui_state
+    from openpilot.starpilot.ui.camera_color import road_color_strength
+    return shared().render(view, rect, ui_state.sm, camera_view=camera_view, reverse_driver=reverse_driver, poll_camera=poll_camera,
+                           started_frame=ui_state.started_frame, status=ui_state.status.value,
+                           color_strength=lambda: road_color_strength(ui_state), projection=projecting(), road_style=road_style,
+                           stop_sign=noted_stop_sign(), clock=lambda: ui_state.display_time_ns() / 1e9, lead_display=lead_display)
+  except Exception:
+    cloudlog.exception("scene views: camera layer hook failed, keeping the stock camera view")
+    _hook_failed = True
+    return False
+
+
+_hook_failed = False
 
 
 def projecting() -> bool:
