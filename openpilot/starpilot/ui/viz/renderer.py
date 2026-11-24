@@ -32,11 +32,11 @@ THROTTLE = ((13, 248, 122, 102), (114, 255, 92, 0))
 NO_THROTTLE = ((242, 242, 242, 102), (242, 242, 242, 0))
 STATUS_GLOW = {"engaged": (0.12, 0.86, 0.45, 0.38), "override": (0.75, 0.78, 0.8, 0.22)}
 
-# Vehicle model id in the shader, footprint (length, width) and the radius of its wheels.
-VEHICLE_MODELS = {VehicleModel.CAR: (0, 4.6, 1.84, 0.34), VehicleModel.TRUCK: (1, 5.6, 2.0, 0.4),
-                  VehicleModel.SPHERE: (2, 1.8, 1.8, 0.9)}
-VEHICLE_HEIGHT = {VehicleModel.CAR: 1.48, VehicleModel.TRUCK: 1.95, VehicleModel.SPHERE: 1.82}
-GLOSS = {VehicleModel.CAR: 0.85, VehicleModel.TRUCK: 0.7, VehicleModel.SPHERE: 0.9}
+# Shader model id, size (length, width, height in m), wheel radius and paint gloss of each vehicle model.
+VEHICLE_MODELS = {VehicleModel.CAR: (0, (4.6, 1.84, 1.48), 0.34, 0.85), VehicleModel.TRUCK: (1, (5.6, 2.0, 1.95), 0.4, 0.7),
+                  VehicleModel.SPHERE: (2, (1.8, 1.8, 1.82), 0.9, 0.9)}
+STOP_SIGN_MODEL, STOP_SIGN_SIZE = 3, (0.24, 0.88, 2.75)
+STOP_MARKER_MODEL, STOP_MARKER_SIZE = 4, (1.9, 1.9, 0.15)
 BLINK_PERIOD = 1.0   # s, matches StarPilot's turn signal border (500 ms on, 500 ms off)
 ODOMETER_WRAP = 2400.0  # m; a multiple of the dash (12 m) and grid (4 m) periods so the wrap is invisible
 
@@ -130,13 +130,25 @@ VEHICLE_UNIFORMS = ("uvToRay", "camPos", "quad", "pose", "model", "paint", "ligh
 
 @dataclass
 class Body:
-  """A vehicle to draw: its footprint centre on the road, heading and look."""
-  center: np.ndarray
+  """Something the vehicle shader draws: a vehicle (with a shadow and lights) or a roadside prop."""
+  center: np.ndarray    # footprint centre on the road (foot of the post for a sign)
   yaw: float
-  look: VehicleLook
-  lights: np.ndarray   # headlights, tail/brake, left, right
+  model: int            # shader model id
+  size: tuple           # length, width, height (m)
+  rgb: tuple
+  gloss: float
+  lights: np.ndarray    # headlights, tail/brake, left, right (a sign's opacity in x)
+  wheel_radius: float = 0.34
   reverse: float = 0.0
   tail_glow: float = 0.0
+  shadow: bool = True
+  round: bool = False   # round footprint (sphere): smaller, softer shadow
+
+  @classmethod
+  def vehicle(cls, center: np.ndarray, yaw: float, look: VehicleLook, lights: np.ndarray, **kwargs) -> Body:
+    model, size, wheel_radius, gloss = VEHICLE_MODELS[look.model]
+    return cls(center, yaw, model, size, look.rgb, gloss, lights, wheel_radius=wheel_radius,
+               round=look.model == VehicleModel.SPHERE, **kwargs)
 
 
 class VizRenderer:
@@ -212,6 +224,7 @@ class VizRenderer:
 
     program = self._camera_program(frame.egl) if mode_style.shader_mode and frame is not None and source is not None else None
     bodies = self._bodies(rig, scene, style, blink_on) if scene.valid else []
+    props = self._props(scene, rig) if scene.valid else []
     ground = program or self._synthetic
     rl.begin_shader_mode(ground.shader)
     self._ground_uniforms(ground, rect, rig, camera, scene, mode_style, road_style, bodies, status)
@@ -226,7 +239,7 @@ class VizRenderer:
       return
     if rig.stop_curtain:
       self._draw_stop_curtain(rect, camera, scene)
-    self._draw_vehicles(rect, camera, scene, bodies)
+    self._draw_vehicles(rect, camera, scene, props + bodies)
 
   # ---- ground
 
@@ -292,11 +305,11 @@ class VizRenderer:
 
     poses = np.zeros((shaders.MAX_BODIES, 4), dtype=np.float32)
     sizes = np.zeros((shaders.MAX_BODIES, 4), dtype=np.float32)
-    for i, body in enumerate(bodies[:shaders.MAX_BODIES]):
-      _, length, width, _ = VEHICLE_MODELS[body.look.model]
+    for i, body in enumerate([body for body in bodies if body.shadow][:shaders.MAX_BODIES]):
+      length, width, _ = body.size
       poses[i] = (body.center[0], body.center[1], math.cos(body.yaw), math.sin(body.yaw))
-      round_body = body.look.model == VehicleModel.SPHERE
-      sizes[i] = (length / 2 * (0.6 if round_body else 1.0), width / 2 * (0.6 if round_body else 1.0), 0.55, body.tail_glow)
+      shrink = 0.6 if body.round else 1.0
+      sizes[i] = (length / 2 * shrink, width / 2 * shrink, 0.55, body.tail_glow)
     program.set("bodyPose", poses, UNIFORM_VEC4, shaders.MAX_BODIES)
     program.set("bodySize", sizes, UNIFORM_VEC4, shaders.MAX_BODIES)
     glow = STATUS_GLOW.get(status) if rig.show_ego and bodies else None
@@ -375,20 +388,29 @@ class VizRenderer:
     tail = 0.35 * night
     bodies = []
     if rig.show_ego:
-      _, length, _, _ = VEHICLE_MODELS[style.ego.model]
+      length = VEHICLE_MODELS[style.ego.model][1][0]
       center = np.array([RADAR_TO_CAMERA - length / 2, 0.0, scene.height])
       lights = _f32(night, 1.0 if signals.braking else tail, float(signals.left_blinker and blink_on),
                     float(signals.right_blinker and blink_on))
-      bodies.append(Body(center, 0.0, style.ego, lights, reverse=float(signals.reverse),
-                         tail_glow=0.6 * night + (0.5 if signals.braking else 0.0) * max(night, 0.25)))
+      bodies.append(Body.vehicle(center, 0.0, style.ego, lights, reverse=float(signals.reverse),
+                                 tail_glow=0.6 * night + (0.5 if signals.braking else 0.0) * max(night, 0.25)))
     for lead in scene.leads:
-      _, length, _, _ = VEHICLE_MODELS[style.lead.model]
+      length = VEHICLE_MODELS[style.lead.model][1][0]
       forward = np.array([math.cos(lead.heading), math.sin(lead.heading), 0.0])
       center = lead.rear + forward * (length / 2)
       lights = _f32(night, 1.0 if lead.braking else tail, 0.0, 0.0)
-      bodies.append(Body(center, lead.heading, style.lead, lights,
-                         tail_glow=0.6 * night + (0.5 if lead.braking else 0.0) * max(night, 0.25)))
+      bodies.append(Body.vehicle(center, lead.heading, style.lead, lights,
+                                 tail_glow=0.6 * night + (0.5 if lead.braking else 0.0) * max(night, 0.25)))
     return bodies
+
+  @staticmethod
+  def _props(scene: Scene, rig: Rig) -> list[Body]:
+    """Roadside objects: the stop sign StarPilot confirmed, facing us (lying flat as a marker in the top view)."""
+    sign = scene.stop_sign
+    if sign is None or sign.opacity <= 0.01:
+      return []
+    model, size = (STOP_SIGN_MODEL, STOP_SIGN_SIZE) if rig.upright_signs else (STOP_MARKER_MODEL, STOP_MARKER_SIZE)
+    return [Body(sign.position, 0.0, model, size, (0, 0, 0), 0.25, _f32(sign.opacity, 0.0, 0.0, 0.0), shadow=False)]
 
   def _draw_vehicles(self, rect: rl.Rectangle, camera: VirtualCamera, scene: Scene, bodies: list[Body]) -> None:
     program = self._vehicle
@@ -411,12 +433,11 @@ class VizRenderer:
     program.set("sky", sky, UNIFORM_VEC4)
     wheel_turn = 0.0
     for _depth, body, (x0, y0, x1, y1) in sorted(items, key=lambda item: -item[0]):  # far to near
-      model, _, _, radius = VEHICLE_MODELS[body.look.model]
-      wheel_turn = (self._odometer / radius) % (2 * math.pi)
+      wheel_turn = (self._odometer / body.wheel_radius) % (2 * math.pi)
       program.set("quad", _f32((x0 - r[0]) / r[2], (y0 - r[1]) / r[3], (x1 - x0) / r[2], (y1 - y0) / r[3]), UNIFORM_VEC4)
       program.set("pose", _f32(body.center[0], body.center[1], body.center[2], body.yaw), UNIFORM_VEC4)
-      program.set("model", np.array([model], dtype=np.int32), UNIFORM_INT)
-      program.set("paint", _f32(*(c / 255.0 for c in body.look.rgb), GLOSS[body.look.model]), UNIFORM_VEC4)
+      program.set("model", np.array([body.model], dtype=np.int32), UNIFORM_INT)
+      program.set("paint", _f32(*(c / 255.0 for c in body.rgb), body.gloss), UNIFORM_VEC4)
       program.set("lights", body.lights, UNIFORM_VEC4)
       program.set("extra", _f32(body.reverse, scene.darkness, pixel, wheel_turn), UNIFORM_VEC4)
       rl.draw_texture_pro(self._white, rl.Rectangle(0, 0, 1, 1), rl.Rectangle(x0, y0, x1 - x0, y1 - y0), rl.Vector2(0, 0),
@@ -427,8 +448,7 @@ class VizRenderer:
   @staticmethod
   def _screen_box(camera: VirtualCamera, body: Body, rect) -> tuple[float, float, float, float] | None:
     """Screen rectangle covering the vehicle and the glow of its lamps, clipped to the layer; None when off screen."""
-    _, length, width, _ = VEHICLE_MODELS[body.look.model]
-    height = VEHICLE_HEIGHT[body.look.model]
+    length, width, height = body.size
     hl, hw = length / 2 + 0.5, width / 2 + 0.5  # room for lamp glow
     c, s = math.cos(body.yaw), math.sin(body.yaw)
     corners = np.array([[sx * hl, sy * hw] for sx in (-1, 1) for sy in (-1, 1)])

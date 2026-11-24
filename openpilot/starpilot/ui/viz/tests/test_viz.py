@@ -1,9 +1,12 @@
 """Scene view math, rigs, scene extraction, settings and widget registration. No GPU or raylib window needed."""
 import copy
 import json
+import shutil
+import subprocess
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from openpilot.common.transformations.camera import DEVICE_CAMERAS, view_frame_from_device_frame
 from openpilot.common.transformations.orientation import rot_from_euler
@@ -12,8 +15,8 @@ from openpilot.starpilot.ui.viz import settings, shaders
 from openpilot.starpilot.ui.viz.geometry import look_at, top_down_rotation
 from openpilot.starpilot.ui.viz.options import SelectionStore, VehicleModel, ViewAngle, VizMode, VizSelection
 from openpilot.starpilot.ui.viz.rigs import RIGS, RigContext, stock_front_camera
-from openpilot.starpilot.ui.viz.scene import (LEAD_BRAKE_HOLD, RADAR_TO_CAMERA, SAMPLE_X, SAMPLES, STOP_MIN_AHEAD, Scene,
-                                              SceneTracker)
+from openpilot.starpilot.ui.viz.scene import (LEAD_BRAKE_HOLD, RADAR_TO_CAMERA, SAMPLE_X, SAMPLES, STOP_MIN_AHEAD,
+                                              STOP_SIGN_KEEP, Scene, SceneTracker, StopSign, StopSignTracker, stop_sign_sighting)
 from openpilot.starpilot.ui.viz.widgets import COMMA_ONLY_WIDGETS, SWITCHER_WIDGET, TURN_SIGNAL_WIDGET
 
 RECT = (30.0, 30.0, 2100.0, 1020.0)
@@ -262,3 +265,47 @@ def test_widgets_are_registered_for_the_comma_screen_only():
   upgraded = validate_document(older)  # a layout saved before the widgets existed gains them
   assert upgraded["layouts"]["large"][TURN_SIGNAL_WIDGET] == large[TURN_SIGNAL_WIDGET]["default"]
   assert set(COMMA_ONLY_WIDGETS) <= set(upgraded["widgetOrder"]["large"])
+
+
+def test_shaders_compile_as_glsl_es(tmp_path):
+  """The comma's GPU only takes GLSL ES; check every shader with the Khronos reference compiler when it is installed."""
+  validator = shutil.which("glslangValidator")
+  if validator is None:
+    pytest.skip("glslangValidator not installed")
+  road_color = "highp vec3 road_color(highp vec3 rgb, highp float strength) { return rgb * strength; }"
+  sources = {"quad.vert": shaders.VERTEX_SHADER, "ground.frag": shaders.SYNTHETIC_GROUND_SHADER,
+             "camera.frag": shaders.camera_ground_shader(False, road_color), "camera_egl.frag": shaders.camera_ground_shader(True, road_color),
+             "vehicle.frag": shaders.VEHICLE_SHADER}
+  for name, source in sources.items():
+    path = tmp_path / name
+    path.write_text(source)
+    result = subprocess.run([validator, str(path)], capture_output=True, text=True)
+    assert result.returncode == 0, f"{name}: {result.stdout}"
+
+
+def test_stop_sign_comes_from_starpilots_own_confirmation():
+  from openpilot.starpilot.speed_limits.vision.stop_observation import STOP_RANGE_OFFSET_M, StopBox, StopEvidence
+  sample = StopEvidence("session", "road", 1_000_000_000, 1, 7, 1928, 1208,
+                        (StopBox(0.65, (100, 100, 120, 120)), StopBox(0.9, (1164 + 100, 554 - 20, 1164 + 140, 554 + 20))))
+  confirmed = SimpleNamespace(confirmed_ns=sample.observed_ns, distance_m=22.0, previous=sample)
+  depth, across, up, age = stop_sign_sighting(confirmed, now_ns=1_250_000_000)
+  assert depth == 22.0 - STOP_RANGE_OFFSET_M  # StarPilot's distance is where the car stops, past the sign
+  assert np.isclose(across, (1164 + 120 - 964) / 2648.0) and np.isclose(up, (554 - 604) / 2648.0)  # most confident box
+  assert age == 0.25
+  assert stop_sign_sighting(SimpleNamespace(confirmed_ns=0, distance_m=None, previous=sample), now_ns=0) is None
+
+
+def test_stop_sign_stays_on_the_road_while_we_drive_past():
+  tracker = StopSignTracker()
+  calib = view_frame_from_device_frame  # straight-ahead calibration
+  sighting = (20.0, 0.1, -0.05, 0.0)
+  sign = tracker.update(sighting, calib, 1.2, v_ego=0.0, dt=0.05)
+  np.testing.assert_allclose(sign.position, [20.0, 2.0, 1.2], atol=1e-9)
+  for _ in range(10):  # the same sighting again: only our own travel moves it
+    sign = tracker.update(sighting, calib, 1.2, v_ego=5.0, dt=0.1)
+  np.testing.assert_allclose(sign.position[:2], [15.0, 2.0], atol=1e-9)
+  assert sign.opacity > 0.9
+  for _ in range(int(STOP_SIGN_KEEP / 0.1) + 20):  # out of sight for good: fades away
+    sign = tracker.update(None, calib, 1.2, v_ego=0.0, dt=0.1)
+  assert sign is None
+  assert isinstance(tracker.update((10.0, 0.0, 0.0, 0.0), calib, 1.2, 0.0, 0.05), StopSign)  # a new sign starts afresh

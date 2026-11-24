@@ -379,8 +379,9 @@ def camera_ground_shader(egl: bool, road_color: str) -> str:
 
 # ---- vehicles
 
-# Model ids (renderer.VEHICLE_MODELS): 0 car, 1 pickup truck, 2 sphere. Local frame: x forward, y right, z UP, metres,
-# origin at the centre of the footprint on the road.
+# Model ids (renderer.VEHICLE_MODELS): 0 car, 1 pickup truck, 2 sphere, 3 stop sign, 4 stop sign lying flat (a map marker
+# for the top view). Local frame: x forward, y right, z UP, metres, origin at the centre of the footprint on the road
+# (the foot of the post for the sign).
 VEHICLE_SHADER = VERSION + """
 in vec2 fragTexCoord;
 in vec4 fragColor;
@@ -392,7 +393,8 @@ uniform vec4 quad;          // this quad within the layer, in layer uv: x, y, w,
 uniform vec4 pose;          // x, y, road z (calib), yaw
 uniform int model;
 uniform vec4 paint;         // rgb, a = gloss
-uniform vec4 lights;        // x: headlights, y: tail (0 off, ~0.4 tail lamps, 1 brake), z/w: left/right indicator
+uniform vec4 lights;        // x: headlights, y: tail (0 off, ~0.4 tail lamps, 1 brake), z/w: left/right indicator;
+                            // for the stop sign x is its opacity
 uniform vec4 extra;         // x: reversing lights, y: darkness, z: radians per pixel, w: wheel turn (rad)
 uniform vec4 sky;           // ambient sky colour for reflections
 
@@ -456,7 +458,37 @@ float truckBody(vec3 p) {
   return smin(body, cab, 0.06);
 }
 
+float octagon(vec2 p, float r) {
+  const vec3 k = vec3(-0.9238795325, 0.3826834323, 0.4142135623);
+  p = abs(p);
+  p -= 2.0 * min(dot(k.xy, p), 0.0) * k.xy;
+  p -= 2.0 * min(dot(vec2(-k.x, k.y), p), 0.0) * vec2(-k.x, k.y);
+  p -= vec2(clamp(p.x, -k.z * r, k.z * r), r);
+  return length(p) * sign(p.y);
+}
+
+// 30 inch (0.76 m) stop sign facing oncoming traffic (-x), centre 2.3 m up, on a post just behind it.
+float stopSign(vec3 p) {
+  vec3 q = p - vec3(0.0, 0.0, 2.3);
+  vec2 d = vec2(octagon(q.yz, 0.381), abs(q.x) - 0.015);
+  float plate = min(max(d.x, d.y), 0.0) + length(max(d, 0.0)) - 0.004;
+  float post = max(length(p.xy - vec2(0.05, 0.0)) - 0.035, max(-p.z, p.z - 2.25));
+  return min(plate, post);
+}
+
+// Flat marker: the same octagon lying on the road, top edge pointing ahead.
+float stopMarker(vec3 p) {
+  vec2 d = vec2(octagon(vec2(p.y, p.x), 0.9), abs(p.z - 0.06) - 0.04);
+  return min(max(d.x, d.y), 0.0) + length(max(d, 0.0)) - 0.01;
+}
+
 float shape(vec3 p) {
+  if (model == 4) {
+    return stopMarker(p);
+  }
+  if (model == 3) {
+    return stopSign(p);
+  }
   if (model == 2) {
     return length(p - vec3(0.0, 0.0, 0.9)) - 0.9;
   }
@@ -474,6 +506,8 @@ vec3 normalAt(vec3 p, float eps) {
 
 // Half extents of the model's bounds around (0, 0, h) and that centre height.
 vec4 bounds() {
+  if (model == 4) return vec4(0.95, 0.95, 0.12, 0.06);
+  if (model == 3) return vec4(0.12, 0.44, 1.37, 1.37);
   if (model == 2) return vec4(0.92, 0.92, 0.92, 0.9);
   if (model == 1) return vec4(2.86, 1.08, 0.98, 0.96);
   return vec4(2.36, 1.0, 0.75, 0.73);
@@ -494,6 +528,9 @@ struct Lamp {
 };
 
 float lampLevel(int i) {
+  if (model >= 3) {
+    return 0.0;
+  }
   if (model == 2) {
     return i < 2 ? max(lights.y, 0.0) : 0.0;
   }
@@ -539,6 +576,24 @@ vec3 surface(vec3 p, vec3 n, vec3 rd, out float gloss) {
   gloss = paint.a;
   vec3 albedo = paint.rgb;
   bool truck = model == 1;
+  if (model >= 3) {
+    gloss = 0.25;
+    // face coordinates as the driver sees them (x right, y up) and the octagon's half size
+    bool lying = model == 4;
+    vec2 f = lying ? vec2(p.y, p.x) : vec2(p.y, p.z - 2.3);
+    float r = lying ? 0.9 : 0.381;
+    float face = octagon(f, r);
+    bool front = lying ? n.z > 0.5 : n.x < -0.3;
+    if (face > 0.01 || !front) {
+      return vec3(0.5, 0.52, 0.55);  // post, edges and the back of the plate
+    }
+    float glow = 1.0 + 0.7 * extra.y;  // retroreflective: brighter at night, as if in our headlights
+    vec2 g = f / r;
+    if (face > -0.09 * r || (abs(g.y) < 0.22 && abs(g.x) < 0.7 && fract((g.x + 0.7) / 0.35) < 0.78)) {
+      return vec3(0.93) * glow;  // white border and four blocks standing in for STOP
+    }
+    return vec3(0.76, 0.05, 0.06) * glow;
+  }
   if (model == 2) {
     return albedo;
   }
@@ -663,6 +718,9 @@ void main() {
     float g = exp(-miss * miss / (radius * radius)) * l.level * (0.55 + 0.45 * extra.y);
     result.rgb = mix(result.rgb, l.color, g * (1.0 - result.a * 0.5));
     result.a = max(result.a, g);
+  }
+  if (model >= 3) {
+    result.a *= lights.x;
   }
   if (result.a <= 0.003) {
     discard;

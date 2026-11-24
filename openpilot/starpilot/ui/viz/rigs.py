@@ -64,6 +64,7 @@ class Rig:
   # Chase and top reproject only the main road camera: it is sharper, better in low light and sees no interior.
   reprojection_stream: str | None = "narrow"
   stop_curtain = True       # draw the stop line's glow wall; it is edge-on from straight above
+  upright_signs = True      # stand signs on posts; from straight above they lie flat like map markers
 
   def reset(self) -> None:
     pass
@@ -118,6 +119,7 @@ class TopDownRig(Rig):
   lane_half_width = 0.1
   edge_half_width = 0.09
   stop_curtain = False
+  upright_signs = False
 
   def __init__(self):
     self._ahead: float | None = None
@@ -129,6 +131,8 @@ class TopDownRig(Rig):
     target = 12.0 + 0.9 * max(scene.v_ego, 0.0)
     if scene.leads:
       target = max(target, scene.leads[0].rear[0] + 8.0 - scene.ego_ground[0])
+    if scene.stop_sign is not None and scene.stop_sign.position[0] > 0.0:
+      target = max(target, scene.stop_sign.position[0] + 4.0 - scene.ego_ground[0])
     target = float(np.clip(target, self.min_ahead, self.max_ahead))
     self._ahead = _smooth(self._ahead, target, dt, self.zoom_time)
     return self._ahead

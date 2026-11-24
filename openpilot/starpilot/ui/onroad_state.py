@@ -239,6 +239,7 @@ class OnroadState:
     return self.longitudinal_active or self.longitudinal_overridden or self.stock_cruise_active
 
   stop_sign_observed_ns: int = 0
+  stop_sign_ahead: tuple[float, float, float, float] | None = None  # the confirmed STOP box for the scene views
   weather_location: tuple[float, float] | None = None
   weather: WeatherReading | None = None
   ford_rear_fog_on: bool = False

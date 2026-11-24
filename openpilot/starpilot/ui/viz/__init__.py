@@ -20,6 +20,9 @@ What the scene shows
     taillight glow (darkness from the road camera exposure, like the UI's brightness)
   * the lane being changed into, tinted blue (red while that blind spot is occupied)
   * a glowing red stop line where the model wants to stop (modelV2.action.shouldStop at the predicted stopping point)
+  * a stop sign beside the road while StarPilot shows its STOP icon: the same confirmed sighting and distance StarPilot
+    already computes (runtime_snapshot -> OnroadState.stop_sign_ahead -> camera layer), placed once and then kept on
+    the road from our own travel; nothing is detected or matched again. In the top view it lies flat like a map marker
   * the path in StarPilot's path style (acceleration, solid colour or rainbow) and custom lane line colours
   * our engagement status as a soft glow under the car
 

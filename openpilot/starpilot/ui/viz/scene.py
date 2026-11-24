@@ -41,6 +41,10 @@ LEAD_STOPPED = 0.4        # m/s
 LEAD_BRAKE_HOLD = 0.6     # s; vision accelerations are noisy, so the lights stay on at least this long
 EGO_BRAKE_DECEL = -1.0    # m/s^2; our brake lights also come on under firm (ACC) deceleration
 
+# Stop signs come from StarPilot's own confirmed STOP sighting (the same one that shows its STOP icon)
+STOP_SIGN_KEEP = 6.0      # s; a placed sign stays this long after the last sighting (it leaves the camera's view up close)
+STOP_SIGN_MOVE = 8.0      # m; a sighting this far from the placed sign is a different sign
+
 
 def _empty() -> np.ndarray:
   return np.empty((0, 3), dtype=np.float64)
@@ -57,6 +61,12 @@ class Lead:
   braking: bool             # inferred brake lights
   radar: bool
   primary: bool             # leadOne
+
+
+@dataclass(frozen=True)
+class StopSign:
+  position: np.ndarray      # foot of the post on the road, calib frame
+  opacity: float
 
 
 @dataclass
@@ -98,6 +108,7 @@ class Scene:
   allow_throttle: bool = True
   signals: Signals = field(default_factory=Signals)
   darkness: float = 0.0     # 0 day .. 1 night
+  stop_sign: StopSign | None = None
 
   @property
   def ego_ground(self) -> np.ndarray:
@@ -300,3 +311,60 @@ class SceneTracker:
                         heading=_heading(scene.path, x + 2.0), d_rel=d_rel, v_rel=float(data.vRel), v_lead=v_lead,
                         a_lead=a_lead, braking=braking, radar=bool(data.radar), primary=primary))
     return leads
+
+
+def stop_sign_sighting(confirmation, now_ns: int) -> tuple[float, float, float, float] | None:
+  """The sign StarPilot's StopConfirmation currently confirms, as (depth m, across, up, age s) in the road camera.
+
+  Reuses StarPilot's own result: the distance it already computed and the box it already validated and matched;
+  nothing is detected or matched again. across/up are the box centre's ray (x right, y down per unit depth).
+  """
+  sample = getattr(confirmation, "previous", None)
+  if not getattr(confirmation, "confirmed_ns", 0) or confirmation.distance_m is None or sample is None or not sample.boxes:
+    return None
+  from openpilot.starpilot.speed_limits.vision.stop_observation import ROAD_FOCAL_PX, STOP_RANGE_OFFSET_M
+  focal = ROAD_FOCAL_PX.get((sample.width, sample.height))
+  if not focal:
+    return None
+  x1, y1, x2, y2 = max(sample.boxes, key=lambda box: box.confidence).bbox
+  age = min(max((now_ns - sample.observed_ns) / 1e9, 0.0), 1.5)
+  return (float(confirmation.distance_m) - STOP_RANGE_OFFSET_M, ((x1 + x2) / 2 - sample.width / 2) / focal,
+          ((y1 + y2) / 2 - sample.height / 2) / focal, age)
+
+
+class StopSignTracker:
+  """Places the sign StarPilot confirms on the road and keeps it there while we drive up to and past it.
+
+  Per frame this is one subtraction (our travel); a new sighting adds one 3x3 rotation into the calib frame.
+  """
+
+  def __init__(self):
+    self.position: np.ndarray | None = None
+    self.opacity = 0.0
+    self._unseen = 0.0
+    self._last: tuple | None = None
+
+  def update(self, sighting, view_from_calib: np.ndarray, height: float, v_ego: float, dt: float) -> StopSign | None:
+    travel = max(v_ego, 0.0) * max(dt, 0.0)
+    if self.position is not None:
+      self.position[0] -= travel  # the sign stays put; we move
+    if sighting is not None and sighting != self._last:
+      self._last = sighting
+      depth, across, up, age = sighting
+      seen = np.asarray(view_from_calib).T @ np.array([across * depth, up * depth, depth])  # view -> calib
+      seen[0] -= max(v_ego, 0.0) * age  # where it is now, not when the frame was taken
+      seen[2] = height
+      if self.position is None or np.hypot(*(seen[:2] - self.position[:2])) > STOP_SIGN_MOVE:
+        self.position = seen
+      else:
+        self.position += (seen - self.position) * 0.35  # boxes jitter between frames; settle on the sign
+      self._unseen = 0.0
+    elif sighting is None:
+      self._last = None
+      self._unseen += max(dt, 0.0)
+    shown = self.position is not None and self._unseen < STOP_SIGN_KEEP and self.position[0] > -10.0
+    self.opacity += ((1.0 if shown else 0.0) - self.opacity) * min(max(dt, 0.0) / 0.3, 1.0)
+    if self.position is None or (not shown and self.opacity < 0.02):
+      self.position, self.opacity = None, 0.0
+      return None
+    return StopSign(self.position.copy(), self.opacity)

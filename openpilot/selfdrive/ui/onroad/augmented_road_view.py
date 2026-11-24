@@ -53,12 +53,13 @@ class AugmentedRoadView(CameraView):
 
   def render_camera_model_layer(self, rect: rl.Rectangle, *, camera_view: int = CAMERA_VIEW_AUTO,
                                 reverse_driver: bool = False, road_style: dict | None = None,
-                                lead_display: tuple[bool, int, bool | None] | None = None, poll_camera: bool = True) -> None:
+                                lead_display: tuple[bool, int, bool | None] | None = None, poll_camera: bool = True,
+                                stop_sign: tuple | None = None) -> None:
     """Draw the existing calibrated camera/model without stock HUD or alert."""
     if not ui_state.started and ui_state.replay_clock is None:
       return
     if scene_views.render_layer(self, rect, camera_view=camera_view, reverse_driver=reverse_driver, poll_camera=poll_camera,
-                                road_style=road_style):
+                                road_style=road_style, stop_sign=stop_sign):
       return
     if poll_camera and (camera_view == CAMERA_VIEW_DRIVER or reverse_driver):
       self._ensure_connection()

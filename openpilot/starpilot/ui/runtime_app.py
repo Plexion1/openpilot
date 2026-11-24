@@ -190,7 +190,7 @@ class StarShellSession:
                                                  reverse_driver=state.reverse_driver_camera,
                                                  road_style=state.customization["roadColors"]["large"],
                                                  lead_display=(True, int(state.appearance.lead_info_mode), state.appearance.lead_info_metric)
-                                                 if state.appearance.lead_info_mode else None)
+                                                 if state.appearance.lead_info_mode else None, stop_sign=state.stop_sign_ahead)
       self.view = ShellView(self.fonts, Path(__file__).parents[2] / "selfdrive/assets",
                             camera_layer=camera_layer,
                             pip_layer=self._render_pip)

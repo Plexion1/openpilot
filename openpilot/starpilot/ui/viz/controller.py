@@ -22,7 +22,7 @@ from openpilot.starpilot.ui.viz.controls import VizControls
 from openpilot.starpilot.ui.viz.options import SelectionStore, VizMode, VizSelection
 from openpilot.starpilot.ui.viz.renderer import VizRenderer
 from openpilot.starpilot.ui.viz.rigs import RIGS, RigContext, stock_front_camera
-from openpilot.starpilot.ui.viz.scene import SceneTracker
+from openpilot.starpilot.ui.viz.scene import SceneTracker, StopSignTracker
 
 # AugmentedRoadView camera_view values (appearance CameraView param) that keep the stock layer.
 CAMERA_VIEW_DRIVER, CAMERA_VIEW_NONE = 1, 4
@@ -40,6 +40,7 @@ class SceneViews:
   def __init__(self, store: SelectionStore | None = None):
     self.store = store or SelectionStore()
     self.tracker = SceneTracker()
+    self.stop_signs = StopSignTracker()
     self.renderer = VizRenderer()
     self.controls = VizControls()
     self.failed = False
@@ -50,8 +51,14 @@ class SceneViews:
     return self.store.get()
 
   def render(self, view, rect: rl.Rectangle, sm, *, camera_view: int, reverse_driver: bool, poll_camera: bool,
-             started_frame: int, status: str, color_strength, projection: bool, road_style: dict | None = None) -> bool:
-    """Draw the selected scene view. Returns False when the stock camera/model layer should draw instead."""
+             started_frame: int, status: str, color_strength, projection: bool, road_style: dict | None = None,
+             stop_sign: tuple | None = None, now: float | None = None) -> bool:
+    """Draw the selected scene view. Returns False when the stock camera/model layer should draw instead.
+
+    ``stop_sign`` is StarPilot's own confirmed STOP sighting (scene.stop_sign_sighting), passed through unchanged.
+    ``now`` is StarPilot's display clock in seconds (live: monotonic; replay: the recording's time), so motion, fades and
+    blinking follow a replay's pace and pauses; without it the monotonic clock is used.
+    """
     if self.failed or projection:
       return False
     selection = self.store.get()
@@ -60,7 +67,7 @@ class SceneViews:
       return False
     try:
       self._render(view, rect, sm, selection, camera_view, reverse_driver, poll_camera, started_frame, status, color_strength,
-                   road_style)
+                   road_style, stop_sign, now)
     except Exception:
       # Never take the driving UI down: log once and fall back to the stock layer for this session.
       rl.end_shader_mode()  # in case the failure happened between begin/end
@@ -70,8 +77,9 @@ class SceneViews:
     return True
 
   def _render(self, view, rect, sm, selection: VizSelection, camera_view: int, reverse_driver: bool, poll_camera: bool,
-              started_frame: int, status: str, color_strength, road_style: dict | None) -> None:
-    now = time.monotonic()
+              started_frame: int, status: str, color_strength, road_style: dict | None, stop_sign: tuple | None,
+              now: float | None) -> None:
+    now = now if now else time.monotonic()
     dt = 0.05 if self._last_time is None else min(max(now - self._last_time, 0.0), 0.5)
     self._last_time = now
 
@@ -93,6 +101,8 @@ class SceneViews:
 
     def scene_work():
       scene = self.tracker.update(sm, started_frame, dt)
+      if scene.valid:
+        scene.stop_sign = self.stop_signs.update(stop_sign, feed.road_view_from_calib(), scene.height, scene.v_ego, dt)
       source = feed.geometry()
       r = (rect.x, rect.y, rect.width, rect.height)
       front = stock_front_camera(source.intrinsics, source.view_from_calib, r, source.wide)
@@ -101,7 +111,7 @@ class SceneViews:
       if frame is not None:
         strength = color_strength() if callable(color_strength) else float(color_strength)
       self.renderer.render(rect, rig, camera, scene, selection.mode, dt=dt, style=self.store.style(), road_style=road_style,
-                           frame=frame, source=source, color_strength=strength, status=status, blink_time=rl.get_time())
+                           frame=frame, source=source, color_strength=strength, status=status, blink_time=now)
     _phase("model", scene_work)
 
   def render_switcher(self, x: float, y: float, fill=None, border=None, text=None, fonts=None) -> None:
@@ -143,7 +153,7 @@ def shared() -> SceneViews:
 
 
 def render_layer(view, rect: rl.Rectangle, *, camera_view: int, reverse_driver: bool, poll_camera: bool,
-                 road_style: dict | None = None) -> bool:
+                 road_style: dict | None = None, stop_sign: tuple | None = None) -> bool:
   """AugmentedRoadView hook. True when a scene view was drawn instead of the stock layer."""
   from openpilot.selfdrive.ui.ui_state import ui_state
   from openpilot.starpilot.ui.camera_color import road_color_strength
@@ -151,7 +161,8 @@ def render_layer(view, rect: rl.Rectangle, *, camera_view: int, reverse_driver: 
   projection = ui_state.projection_read_only and ui_state.replay_clock is None
   return shared().render(view, rect, ui_state.sm, camera_view=camera_view, reverse_driver=reverse_driver, poll_camera=poll_camera,
                          started_frame=ui_state.started_frame, status=ui_state.status.value,
-                         color_strength=lambda: road_color_strength(ui_state), projection=projection, road_style=road_style)
+                         color_strength=lambda: road_color_strength(ui_state), projection=projection, road_style=road_style,
+                         stop_sign=stop_sign, now=ui_state.display_time_ns() / 1e9)
 
 
 def render_switcher(x: float, y: float, fill=None, border=None, text=None, fonts=None) -> None:

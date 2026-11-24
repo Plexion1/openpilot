@@ -52,6 +52,10 @@ class CameraFeed:
   def update_calibration(self) -> None:
     self.view._update_calibration()
 
+  def road_view_from_calib(self) -> np.ndarray:
+    """The main road camera's calibrated rotation (StarPilot's stop sign boxes come from that camera)."""
+    return self.view.view_from_calib
+
   def select_stream(self, sm, preferred: str | None, camera_view: int, reverse_driver: bool) -> None:
     """``preferred`` None keeps StarPilot's own choice (Auto/Standard/Wide); otherwise "wide" or "narrow"."""
     view = self.view
