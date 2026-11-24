@@ -449,19 +449,21 @@ class VizRenderer:
   def _screen_box(camera: VirtualCamera, body: Body, rect) -> tuple[float, float, float, float] | None:
     """Screen rectangle covering the vehicle and the glow of its lamps, clipped to the layer; None when off screen."""
     length, width, height = body.size
-    hl, hw = length / 2 + 0.5, width / 2 + 0.5  # room for lamp glow
+    lit = bool(np.any(body.lights > 0.02)) or body.reverse > 0.02
+    glow = 0.5 if lit and body.model < STOP_SIGN_MODEL else 0.05  # room for lamp glow only while a lamp is on
+    hl, hw = length / 2 + glow, width / 2 + glow
     c, s = math.cos(body.yaw), math.sin(body.yaw)
     corners = np.array([[sx * hl, sy * hw] for sx in (-1, 1) for sy in (-1, 1)])
     xy = body.center[:2] + np.column_stack((corners[:, 0] * c - corners[:, 1] * s, corners[:, 0] * s + corners[:, 1] * c))
-    points = np.vstack((np.column_stack((xy, np.full(4, body.center[2] + 0.3))),
-                        np.column_stack((xy, np.full(4, body.center[2] - height - 0.4)))))
+    points = np.vstack((np.column_stack((xy, np.full(4, body.center[2] + 0.05))),
+                        np.column_stack((xy, np.full(4, body.center[2] - height - glow)))))
     screen, depth = camera.project(points)
     x, y, w, h = rect
     if (depth < 0.3).all():
       return None
     if (depth < 0.3).any():
       return x, y, x + w, y + h  # partly behind the camera: let the shader find it anywhere
-    pad = 12.0  # px, minimum glow around small, distant vehicles
+    pad = 8.0 if lit else 2.0  # px: edge antialiasing, plus a minimum glow around small, distant vehicles
     x0, y0 = screen.min(axis=0) - pad
     x1, y1 = screen.max(axis=0) + pad
     x0, y0, x1, y1 = max(x0, x), max(y0, y), min(x1, x + w), min(y1, y + h)

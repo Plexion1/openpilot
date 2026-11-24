@@ -105,10 +105,15 @@ void roadAt(float x, out vec4 lanes, out vec4 road, out vec4 laneSlope, out floa
   pathSlope = (r1.z - r0.z) / dx * inside;
 }
 
+// Road metres one pixel spans across lines of slope s (dy/dx), from the road point's screen derivatives.
+vec4 footprint(vec4 s, vec2 dpx, vec2 dpy) {
+  return abs(vec4(dpx.y) - s * dpx.x) + abs(vec4(dpy.y) - s * dpy.x);
+}
+
 // Antialiased coverage of lines of half width w at signed lateral offsets delta; thinner than a pixel keeps its weight.
-vec4 lineCoverage(vec4 delta, vec4 slope, float w) {
+vec4 lineCoverage(vec4 delta, vec4 slope, vec4 fw, float w) {
   vec4 d = abs(delta) * inversesqrt(1.0 + slope * slope);
-  vec4 fw = max(fwidth(delta), vec4(1e-4)) * 0.7;
+  fw = max(fw, vec4(1e-4)) * 0.7;
   vec4 width = max(vec4(w), fw * 0.5);
   return (1.0 - smoothstep(width - fw, width + fw, d)) * min(vec4(w) / width, vec4(1.0));
 }
@@ -118,9 +123,9 @@ float band(float v, float lo, float hi, float soft) {
 }
 
 // 3 m dashes every 12 m (US highway spacing), scrolling as we drive; averaged out where they would shimmer.
-float dashes(float x) {
+float dashes(float x, float fx) {
   float u = (x + odometer) / 12.0;
-  float fu = max(fwidth(u), 1e-4);
+  float fu = max(fx / 12.0, 1e-4);
   float ph = fract(u);
   float m = smoothstep(0.0, fu, ph) * (1.0 - smoothstep(0.25 - fu, 0.25 + fu, ph));
   return mix(m, 0.25, smoothstep(0.08, 0.3, fu));
@@ -135,29 +140,32 @@ float fogAmount(float distance) {
   return 1.0 - exp(-distance / fogDistance);
 }
 
-bool groundHit(out vec3 dir, out vec3 p, out float t) {
+// Every pixel's view ray and where it meets the road (also for sky pixels, so the screen derivatives taken right after
+// stay in uniform control flow; the caller then sends the sky to skyColor).
+bool groundRay(out vec3 dir, out vec3 p, out float t) {
   dir = normalize(mat3(uvToRay[0], uvToRay[1], uvToRay[2]) * vec3(fragTexCoord, 1.0));
-  if (dir.z < 1e-4) {
-    return false;
-  }
-  t = (groundZ - camPos.z) / dir.z;
+  t = (groundZ - camPos.z) / max(dir.z, 1e-4);
   p = camPos + dir * t;
-  return t > 0.0;
+  return dir.z >= 1e-4 && t > 0.0;
 }
 
-// Ground colour under synthetic lighting: grid off the road, plain surface on it.
-vec3 syntheticGround(vec2 p, vec4 road) {
-  vec2 g = vec2((p.x + odometer) / 4.0, p.y / 4.0);
-  vec2 fw = max(fwidth(g), vec2(1e-5));
-  vec2 a = abs(fract(g - 0.5) - 0.5) / fw;
-  float grid = (1.0 - min(min(a.x, a.y), 1.0)) * (1.0 - smoothstep(0.12, 0.45, max(fw.x, fw.y)));
+// Ground colour under synthetic lighting: grid off the road, plain surface on it. fp: road metres per pixel.
+vec3 syntheticGround(vec2 p, vec4 road, vec2 fp) {
   float onRoad = roadColor.a <= 0.0 ? 0.0 : band(p.y, road.x, road.y, 0.12) * roadColor.a;
   vec3 base = mix(groundColor.rgb, roadColor.rgb, onRoad);
+  if (onRoad > 0.99) {
+    return base;
+  }
+  vec2 g = vec2((p.x + odometer) / 4.0, p.y / 4.0);
+  vec2 fw = max(fp / 4.0, vec2(1e-5));
+  vec2 a = abs(fract(g - 0.5) - 0.5) / fw;
+  float grid = (1.0 - min(min(a.x, a.y), 1.0)) * (1.0 - smoothstep(0.12, 0.45, max(fw.x, fw.y)));
   return mix(base, gridColor.rgb, grid * gridColor.a * (1.0 - onRoad));
 }
 
 // Everything painted onto the road, applied over the base colour (synthetic surface or camera image).
-vec3 roadDecals(vec3 color, vec2 p, vec4 lanes, vec4 road, vec4 laneSlope, float pathSlope, bool synthetic) {
+vec3 roadDecals(vec3 color, vec2 p, vec2 dpx, vec2 dpy, vec4 lanes, vec4 road, vec4 laneSlope, float pathSlope,
+                bool synthetic) {
   float dark = lighting.x;
   // headlight beams: two soft cones from our bumper, brighter close in
   float beam = 0.0;
@@ -178,9 +186,20 @@ vec3 roadDecals(vec3 color, vec2 p, vec4 lanes, vec4 road, vec4 laneSlope, float
     color += HEADLIGHT * beam * 0.06;
   }
 
+  // Everything below lies on or just beside the road: skip pixels well away from it (most of a top-down view).
+  float nearLo = min(min(road.x, lanes.x), road.z - 4.0) - 2.5;
+  float nearHi = max(max(road.y, lanes.w), road.z + 4.0) + 2.5;
+  if (p.y < nearLo || p.y > nearHi) {
+    return color;
+  }
+  float fx = abs(dpx.x) + abs(dpy.x);  // road metres per pixel along x and across y
+  float fy = abs(dpx.y) + abs(dpy.y);
+
   // road edges
-  float edges = dot(lineCoverage(vec4(p.y - road.x, p.y - road.y, 0.0, 0.0), vec4(0.0), edgeStyle.z).xy, edgeStyle.xy);
-  color = mix(color, vec3(1.0, 0.16, 0.16), clamp(edges, 0.0, 1.0));
+  vec2 edgeFw = vec2(max(fy, 1e-4) * 0.7);
+  vec2 edgeW = max(vec2(edgeStyle.z), edgeFw * 0.5);
+  vec2 edgeCover = (1.0 - smoothstep(edgeW - edgeFw, edgeW + edgeFw, abs(vec2(p.y) - road.xy))) * min(vec2(edgeStyle.z) / edgeW, vec2(1.0));
+  color = mix(color, vec3(1.0, 0.16, 0.16), clamp(dot(edgeCover, edgeStyle.xy), 0.0, 1.0));
 
   // lane change: tint the lane we are moving into (red while the blind spot is occupied)
   if (laneChange.y > 0.0) {
@@ -193,17 +212,19 @@ vec3 roadDecals(vec3 color, vec2 p, vec4 lanes, vec4 road, vec4 laneSlope, float
   }
 
   // lane lines: solid beside a road edge, dashed between lanes; retroreflective paint lights up in the beams
-  vec4 cover = lineCoverage(vec4(p.y) - lanes, laneSlope, edgeStyle.w) * laneAlpha;
-  float dash = dashes(p.x);
+  vec4 cover = lineCoverage(vec4(p.y) - lanes, laneSlope, footprint(laneSlope, dpx, dpy), edgeStyle.w) * laneAlpha;
+  float dash = dashes(p.x, fx);
   cover *= mix(vec4(1.0), vec4(dash), laneDash);
   float glow = 1.0 + beam * 1.5;
   color = mix(color, laneOuter.rgb * glow, clamp(cover.x + cover.w, 0.0, 1.0) * laneOuter.a);
   color = mix(color, laneInner.rgb * glow, clamp(cover.y + cover.z, 0.0, 1.0) * laneInner.a);
 
   // planned path
-  if (pathRange.z > 0.0 && pathRange.y > pathRange.x) {
-    float d = (p.y - road.z) * inversesqrt(1.0 + pathSlope * pathSlope);
-    float fw = max(fwidth(p.y - road.z), 1e-4);
+  float pathFw = max(abs(dpx.y - pathSlope * dpx.x) + abs(dpy.y - pathSlope * dpy.x), 1e-4);
+  float pathD = (p.y - road.z) * inversesqrt(1.0 + pathSlope * pathSlope);
+  if (pathRange.z > 0.0 && p.x > pathRange.x && p.x < pathRange.y && abs(pathD) < pathHalfWidth + pathFw) {
+    float d = pathD;
+    float fw = pathFw;
     float side = 1.0 - smoothstep(pathHalfWidth - fw, pathHalfWidth + fw, abs(d));
     float along = smoothstep(pathRange.x, pathRange.x + 1.0, p.x) * (1.0 - smoothstep(pathRange.y - 1.5, pathRange.y, p.x));
     float t = clamp((p.x - pathRange.x) / max(pathRange.y - pathRange.x, 1.0), 0.0, 1.0);
@@ -229,7 +250,7 @@ vec3 roadDecals(vec3 color, vec2 p, vec4 lanes, vec4 road, vec4 laneSlope, float
     }
     float across = band(p.y, lo - 0.15, hi + 0.15, 0.15);
     float dx = p.x - stopLine.x;
-    float fw = max(fwidth(dx), 1e-4);
+    float fw = max(fx, 1e-4);
     float bar = 1.0 - smoothstep(0.22 - fw, 0.22 + fw, abs(dx));
     float halo = exp(-abs(dx) * 1.1) * (0.8 + 0.2 * sin(time * 4.5));
     vec3 red = vec3(1.0, 0.13, 0.1);
@@ -242,7 +263,7 @@ vec3 roadDecals(vec3 color, vec2 p, vec4 lanes, vec4 road, vec4 laneSlope, float
     vec4 pose = bodyPose[i];
     vec4 size = bodySize[i];
     if (size.x <= 0.0) {
-      continue;
+      break;  // bodies are packed from slot 0
     }
     vec2 d = p - pose.xy;
     vec2 l = vec2(d.x * pose.z + d.y * pose.w, -d.x * pose.w + d.y * pose.z);
@@ -265,14 +286,16 @@ SYNTHETIC_GROUND_SHADER = VERSION + _GROUND_COMMON + """
 void main() {
   vec3 dir, p;
   float t;
-  if (!groundHit(dir, p, t)) {
+  bool ground = groundRay(dir, p, t);
+  vec2 dpx = dFdx(p.xy), dpy = dFdy(p.xy);
+  if (!ground) {
     finalColor = vec4(skyColor(dir), 1.0);
     return;
   }
   vec4 lanes, road, laneSlope;
   float pathSlope;
   roadAt(p.x, lanes, road, laneSlope, pathSlope);
-  vec3 color = roadDecals(syntheticGround(p.xy, road), p.xy, lanes, road, laneSlope, pathSlope, true);
+  vec3 color = roadDecals(syntheticGround(p.xy, road, abs(dpx) + abs(dpy)), p.xy, dpx, dpy, lanes, road, laneSlope, pathSlope, true);
   finalColor = vec4(mix(color, skyColor(vec3(1.0, 0.0, 0.0)), fogAmount(t)), 1.0);
 }
 """
@@ -312,14 +335,16 @@ float luma(vec3 c) {
 void main() {
   vec3 dir, p;
   float t;
-  if (!groundHit(dir, p, t)) {
+  bool ground = groundRay(dir, p, t);
+  vec2 dpx = dFdx(p.xy), dpy = dFdy(p.xy);
+  if (!ground) {
     finalColor = vec4(skyColor(dir), 1.0);
     return;
   }
   vec4 lanes, road, laneSlope;
   float pathSlope;
   roadAt(p.x, lanes, road, laneSlope, pathSlope);
-  vec3 color = syntheticGround(p.xy, road);
+  vec3 color = syntheticGround(p.xy, road, abs(dpx) + abs(dpy));
   vec2 uv;
   float w = cameraWeight(p.xy, uv);
   bool synthetic = true;
@@ -347,7 +372,7 @@ void main() {
       color = mix(color, mix(paintWhite.rgb, paintYellow.rgb, yellow), paint * w);
     }
   }
-  color = roadDecals(color, p.xy, lanes, road, laneSlope, pathSlope, synthetic);
+  color = roadDecals(color, p.xy, dpx, dpy, lanes, road, laneSlope, pathSlope, synthetic);
   finalColor = vec4(mix(color, skyColor(vec3(1.0, 0.0, 0.0)), fogAmount(t)), 1.0);
 }
 """
@@ -615,8 +640,11 @@ vec3 surface(vec3 p, vec3 n, vec3 rd, out float gloss) {
     gloss = 1.0;
     return GLASS;
   }
-  // lamps
+  // lamps sit on the nose and the tail; nothing else needs the lamp tests
   for (int i = 0; i < 10; i++) {
+    if (abs(n.x) < 0.5) {
+      break;
+    }
     Lamp l = lamp(i);
     if (dot(n, l.facing) < 0.5) {
       continue;
@@ -660,7 +688,7 @@ void main() {
     float t = max(span.x, 0.0);
     float best = 1e9, bestT = t;
     bool hit = false;
-    for (int i = 0; i < 72; i++) {
+    for (int i = 0; i < 48; i++) {
       float d = shape(ro + rd * t);
       float ratio = d / (pixel * t);
       if (ratio < best) {
@@ -685,7 +713,7 @@ void main() {
       float dark = extra.y;
       vec3 l = normalize(LIGHT_DIR);
       float diffuse = max(dot(n, l), 0.0);
-      float ao = clamp(0.35 + 0.65 * shape(p + n * 0.18) / 0.18, 0.0, 1.0) * clamp(0.5 + p.z * 1.2, 0.0, 1.0);
+      float ao = clamp(0.55 + p.z * 0.9, 0.0, 1.0);  // darker low down, near the road
       float ambient = 0.5 + 0.5 * n.z;
       float sun = mix(1.0, 0.22, dark), fill = mix(1.0, 0.45, dark);
       vec3 color = albedo * (vec3(0.30, 0.33, 0.38) * ambient * ao * fill + vec3(1.0, 0.97, 0.92) * diffuse * 0.95 * sun);
@@ -704,8 +732,11 @@ void main() {
 
   // glow around lit lamps so they read at a distance (at least a few pixels wide)
   for (int i = 0; i < 10; i++) {
+    if (lampLevel(i) <= 0.02) {
+      continue;
+    }
     Lamp l = lamp(i);
-    if (l.level <= 0.02 || dot(rd, l.facing) > -0.05) {
+    if (dot(rd, l.facing) > -0.05) {
       continue;
     }
     vec3 rel = l.pos - ro;

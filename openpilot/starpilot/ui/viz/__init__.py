@@ -44,9 +44,13 @@ How it hooks into StarPilot (a few lines in existing files)
     nothing is rebuilt.
 
 Cost
+  The driving model runs on the same GPU, so the GPU budget is what matters most.
+  GPU: the scene is drawn at half resolution into an offscreen image during StarPilot's render-prepare step (one
+  ground pass with cheap per-pixel work away from the road, and a ray-marched quad per vehicle sized to it), then
+  stretched over the camera layer. A guard watches modelV2.frameDropPerc and lowers the resolution, then falls back to
+  the stock view for a minute, if the model starts losing frames while a scene view is on (controller.GUARD_*).
   CPU: a few dozen uniform uploads and one draw call for the ground plus one per vehicle; road geometry is resampled
   and uploaded once per model frame. Reported under the UI's "camera" and "model" frame phases like the stock layer.
-  GPU: one full-screen ground pass (ray/road intersection per pixel) and a small ray-marched quad per vehicle.
 
 Safety
   Driving functions are untouched; this only changes what the camera layer paints. Any exception while drawing a scene

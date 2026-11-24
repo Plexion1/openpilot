@@ -57,6 +57,12 @@ class VirtualCamera:
       return None
     return float(h[0] / h[2]), float(h[1] / h[2]), float(h[2])
 
+  def reframed(self, rect: tuple[float, float, float, float], scale: float) -> VirtualCamera:
+    """The same camera drawing into an offscreen image of ``rect`` at ``scale`` (rect's corner at the origin)."""
+    x, y, _, _ = rect
+    to_target = np.array([[scale, 0.0, -x * scale], [0.0, scale, -y * scale], [0.0, 0.0, 1.0]])
+    return VirtualCamera(self.position, self.rotation, to_target @ self.intrinsics)
+
   def uv_to_ray(self, rect: tuple[float, float, float, float]) -> np.ndarray:
     """3x3 matrix taking (u, v, 1) over ``rect`` (u, v in 0..1) to an unnormalised calib-frame ray direction."""
     x, y, w, h = rect

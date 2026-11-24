@@ -309,3 +309,24 @@ def test_stop_sign_stays_on_the_road_while_we_drive_past():
     sign = tracker.update(None, calib, 1.2, v_ego=0.0, dt=0.1)
   assert sign is None
   assert isinstance(tracker.update((10.0, 0.0, 0.0, 0.0), calib, 1.2, 0.0, 0.05), StopSign)  # a new sign starts afresh
+
+
+def test_gpu_guard_backs_off_when_the_model_drops_frames(tmp_path):
+  from openpilot.starpilot.ui.viz import controller
+  views = controller.SceneViews(SelectionStore(tmp_path / "scene_views.json", poll_interval=0.0))
+  sm = _SM()
+  sm.data["modelV2"].frameDropPerc = 0.5
+  views._guard(sm)
+  assert views.render_scale == controller.RENDER_SCALE  # the model keeps up: nothing changes
+  sm.data["modelV2"].frameDropPerc = 8.0
+  scales = []
+  for _ in range(len(controller.GUARD_SCALES) - 1):
+    views._guard(sm)
+    views._guard(sm)  # within the settle time: no second step
+    scales.append(views.render_scale)
+    views._guard_next = 0.0
+  assert scales == list(controller.GUARD_SCALES[1:])
+  views._guard(sm)  # lowest resolution still too much: the stock view takes over for a while
+  assert views._paused_until > 0
+  assert not views.render(None, None, sm, camera_view=2, reverse_driver=False, poll_camera=False, started_frame=0, status="engaged",
+                          color_strength=1.0, projection=False)
