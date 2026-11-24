@@ -459,7 +459,7 @@ class VizRenderer:
     data = self._vehicle_data
     data[shaders.V_RAY:shaders.V_RAY + 3, :3] = uv_to_ray.T
     data[shaders.V_RAY:shaders.V_RAY + 3, 3] = camera.position
-    data[shaders.V_MISC, :2] = (scene.darkness, 1.0 / max(camera.focal, 1.0))
+    data[shaders.V_MISC, :3] = (scene.darkness, 1.0 / max(camera.focal, 1.0), 0.0)  # z: the normal loop's start
     x, y, w, h = r
     for slot, (_depth, body, (x0, y0, x1, y1)) in enumerate(items):
       base = shaders.V_BODY + shaders.BODY_SLOTS * slot

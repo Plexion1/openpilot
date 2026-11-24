@@ -433,7 +433,7 @@ def camera_ground_shader(egl: bool, road_color: str) -> str:
 # Vehicle pass inputs: one vec4 array per frame. A header (V_*) shared by every quad, then BODY_SLOTS per drawn body; each
 # quad finds its body from its vertex colour (red = body index), so all vehicles go out in a single draw call.
 V_RAY = 0          # 3 slots: columns of the (u, v, 1) -> view ray matrix; w holds the virtual camera position
-V_MISC = 3         # darkness, radians per pixel
+V_MISC = 3         # darkness, radians per pixel, 0 (a loop start the compiler cannot see), unused
 V_SKY = 4          # ambient sky colour for reflections
 V_BODY = 5
 BODY_SLOTS = 5     # quad (layer uv x, y, w, h), pose (x, y, road z, yaw), paint (rgb, gloss), lights, extra
@@ -450,6 +450,7 @@ uniform vec4 vehicleData[{VEHICLE_SLOTS}];
 #define camPos vec3(vehicleData[{V_RAY}].w, vehicleData[{V_RAY + 1}].w, vehicleData[{V_RAY + 2}].w)
 #define darkness vehicleData[{V_MISC}].x
 #define pixelAngle vehicleData[{V_MISC}].y
+#define loopStart int(vehicleData[{V_MISC}].z)
 #define sky vehicleData[{V_SKY}]
 
 // This quad's body, read from its slots at the start of main().
@@ -572,9 +573,14 @@ float shape(vec3 p) {
 }
 
 vec3 normalAt(vec3 p, float eps) {
-  vec2 k = vec2(1.0, -1.0);
-  return normalize(k.xyy * shape(p + k.xyy * eps) + k.yyx * shape(p + k.yyx * eps) +
-                   k.yxy * shape(p + k.yxy * eps) + k.xxx * shape(p + k.xxx * eps));
+  // The four tetrahedron samples in a loop the compiler cannot unroll: shape() (every model) is compiled into this
+  // function once instead of four times, which shortens the compile at first use by about a fifth.
+  vec3 n = vec3(0.0);
+  for (int i = loopStart; i < 4; i++) {
+    vec3 e = 2.0 * vec3(float(((i + 3) >> 1) & 1), float((i >> 1) & 1), float(i & 1)) - 1.0;
+    n += e * shape(p + e * eps);
+  }
+  return normalize(n);
 }
 
 // Half extents of the model's bounds around (0, 0, h) and that centre height.

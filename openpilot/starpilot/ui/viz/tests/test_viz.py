@@ -518,3 +518,20 @@ def test_a_widget_error_hides_only_that_widget():
   arrows.render(SimpleNamespace(), 300.0)  # a state without the fields it reads
   assert arrows.failed
   arrows.render(SimpleNamespace(), 300.0)  # stays quiet afterwards
+
+
+@pytest.mark.parametrize("started, v_ego, standstill, replay, allowed", [
+  (False, 0.0, False, False, True),    # parked, offroad
+  (True, 0.0, True, False, True),      # onroad, before the car moves (the comma usually boots into a drive)
+  (True, 0.1, False, False, True),     # creeping to a stop
+  (True, 12.0, False, False, False),   # driving: never stall the UI
+  (False, 0.0, False, True, False),    # StarPilot's replay of a recorded drive
+])
+def test_shaders_are_compiled_ahead_only_while_parked_or_stopped(monkeypatch, started, v_ego, standstill, replay, allowed):
+  import openpilot.selfdrive.ui.ui_state as ui_state_module
+  from openpilot.starpilot.ui.viz import controller
+  car = SimpleNamespace(vEgo=v_ego, standstill=standstill)
+  fake = SimpleNamespace(started=started, replay_clock=object() if replay else None,
+                         sm=type("SM", (), {"seen": {"carState": True}, "__getitem__": lambda self, name: car})())
+  monkeypatch.setattr(ui_state_module, "ui_state", fake)
+  assert controller._stopped() is allowed

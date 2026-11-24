@@ -15,8 +15,9 @@ an offscreen image during StarPilot's render-prepare step (gui_app.add_render_pr
 torque bar and the map overlay) and the camera layer only stretches that image over its rectangle. StarPilot's
 widgets, text and borders are still drawn at full resolution on top. On the frame a scene view is switched on, the
 stock layer draws once while the first offscreen image is prepared; when only the angle or mode changes, the previous
-image shows for that one frame. Shaders take a while to compile on first use, so after a scene view has been used once
-they are compiled while the car is off, one per second, and switching views onroad never stalls the UI.
+image shows for that one frame. Shaders take a while to compile on first use (about a second each on the comma), so
+after a scene view has been used once they are compiled ahead of time, one per second, while parked or stopped: offroad,
+or onroad before the car first moves (the comma usually boots into a drive), so switching views later never stalls.
 
 The time spent is reported through the UI's frame phases like the stock layer: camera polling as "camera", the
 scene and its drawing as "model", so slow frame diagnostics compare directly.
@@ -49,8 +50,9 @@ GUARD_SETTLE = 6.0        # s between steps, so the filtered drop rate can respo
 GUARD_PAUSE = 60.0        # s of stock view once the lowest resolution was not enough
 
 LABEL_TOP_BAND = 0.28     # top of the layer where StarPilot's speed and cruise widgets sit: lead labels avoid it
-WARM_UP_DELAY = 10.0      # s after UI start before shaders are compiled (offroad, once a scene view has been used)
-WARM_UP_SPACING = 1.0     # s between programs, so the offroad UI never stalls for long
+WARM_UP_DELAY = 10.0      # s after UI start before shaders are compiled (once a scene view has been used)
+WARM_UP_SPACING = 1.0     # s between programs, so the UI never stalls for long in one go
+WARM_UP_STOPPED = 0.3     # m/s; onroad, shaders are only compiled while the car is stopped
 
 
 def _phase(name: str, callback, *args):
@@ -189,7 +191,7 @@ class SceneViews:
       self._fail("offscreen render failed")
 
   def _warm_up(self) -> None:
-    """Compile one missing shader every WARM_UP_SPACING while offroad, once a scene view has been used on this device."""
+    """Compile one missing shader every WARM_UP_SPACING while parked or stopped, once a scene view has been used here."""
     if self._warm or self.failed or self.warm_up_allowed is None:
       return
     now = time.monotonic()
@@ -365,16 +367,25 @@ def shared() -> SceneViews:
       from openpilot.system.ui.lib.application import gui_app
       gui_app.add_render_prepare(_shared.prepare, _shared.close)
       _shared.prepare_step = True
-      _shared.warm_up_allowed = _offroad
+      _shared.warm_up_allowed = _stopped
       _shared.warm_up_egl = bool(COMMA_HARDWARE)  # CameraView uses EGL frames on comma hardware
     except Exception:
       cloudlog.exception("scene views: no render-prepare step, drawing scene views directly")
   return _shared
 
 
-def _offroad() -> bool:
+def _stopped() -> bool:
+  """A compile stalls the UI for about a second: only offroad, or onroad while the car is stopped."""
   from openpilot.selfdrive.ui.ui_state import ui_state
-  return not ui_state.started and ui_state.replay_clock is None
+  if ui_state.replay_clock is not None:
+    return False
+  if not ui_state.started:
+    return True
+  sm = ui_state.sm
+  if not sm.seen["carState"]:
+    return False
+  car = sm["carState"]
+  return bool(car.standstill) or abs(float(car.vEgo)) < WARM_UP_STOPPED
 
 
 def install() -> None:
