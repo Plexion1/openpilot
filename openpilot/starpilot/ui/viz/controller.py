@@ -274,7 +274,8 @@ class SceneViews:
 
   def _lead_text(self, job: _Job, scene, camera) -> tuple | None:
     """StarPilot's Lead Info (distance or speed, as on the stock lead marker): its text and the screen points just above
-    the lead's roof and just below its rear bumper (layer pixels; None where behind the camera)."""
+    the lead (the top of its roof as seen from this angle) and just below its rear bumper (layer pixels; None where
+    behind the camera)."""
     display = job.lead_display
     if display is None or not display[0] or not scene.valid or not scene.leads or not scene.leads[0].primary:
       return None
@@ -289,11 +290,15 @@ class SceneViews:
     _model, (length, _width, height), _wheel, _gloss = VEHICLE_MODELS[self.store.style().lead.model]
     c, s = math.cos(lead.heading), math.sin(lead.heading)
     x, y, z = float(lead.rear[0]), float(lead.rear[1]), float(lead.rear[2])
-    roof = camera.project_point((x + c * length / 2, y + s * length / 2, z - height - 0.25))
+    # the middle and the front of the roof, just above it: whichever is higher on screen is the top of the car from this
+    # angle (its roof seen from behind, its nose seen from straight above)
+    roof = [point for point in (camera.project_point((x + c * length / 2, y + s * length / 2, z - height - 0.15)),
+                                camera.project_point((x + c * length, y + s * length, z - height - 0.15))) if point is not None]
     bumper = camera.project_point((x - c * 0.3, y - s * 0.3, z))
-    if roof is None:
+    if not roof:
       return None
-    return text, roof[:2], bumper[:2] if bumper is not None else None
+    top = min(roof, key=lambda point: point[1])
+    return text, top[:2], bumper[:2] if bumper is not None else None
 
   def _draw_lead_label(self, rect: rl.Rectangle) -> None:
     """Like the stock marker's Lead Info: semi-bold 48 px, white with a thin black outline, kept inside the layer. It
