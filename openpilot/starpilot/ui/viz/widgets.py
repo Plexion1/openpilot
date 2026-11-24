@@ -1,12 +1,15 @@
 """Scene view widgets in StarPilot's onroad layout system.
 
-Registered in onroad_customization.PROFILES["large"] (comma screen only; StarPort's own layout leaves them out), so
-Galaxy's layout editor can show, hide, move, recolour and layer them like any other widget, and drawn by OnroadView
-(onroad.py) in the chosen widget order:
+Registered in onroad_customization.PROFILES["large"], so Galaxy's layout editor can show, hide, move, recolour and
+layer them like any other widget, and drawn by OnroadView (onroad.py) in the chosen widget order:
 
 * scene_view_switcher  the VIEW / MODE buttons, bottom right by default. Colours follow the widget's card colours.
 * turn_signals         blinking green arrows either side of the current speed while a turn signal is on, using
                        StarPilot's own turn signal art; its blind spot icon instead while that side is occupied.
+
+StarPort (the Android Auto car screen) has both in its own layout as well (projection_layout.PROJECTION_WIDGETS): the
+turn signal arrows draw there too; the car screen keeps the stock camera view, so its VIEW / MODE buttons are hidden
+from that editor and never drawn there.
 
 This module is imported by onroad_customization, which Galaxy loads without a display, so it must not import raylib
 at module level.
@@ -17,7 +20,7 @@ import math
 
 SWITCHER_WIDGET = "scene_view_switcher"
 TURN_SIGNAL_WIDGET = "turn_signals"
-COMMA_ONLY_WIDGETS = (TURN_SIGNAL_WIDGET, SWITCHER_WIDGET)
+SCENE_VIEW_WIDGETS = (TURN_SIGNAL_WIDGET, SWITCHER_WIDGET)
 SWITCHER_SIZE = (250, 222)       # controls.SIZE
 TURN_SIGNAL_SIZE = (600, 150)
 ARROW_SIZE = (104, 96)           # icons_mici/onroad/turn_signal_left.png at its native size
@@ -33,13 +36,13 @@ def widget_specs() -> dict[str, dict]:
     TURN_SIGNAL_WIDGET: {
       "label": "Turn signals", "kind": TURN_SIGNAL_WIDGET, "width": TURN_SIGNAL_SIZE[0], "height": TURN_SIGNAL_SIZE[1],
       "default": {"x": 630, "y": 65, "enabled": True},
-      "note": "Blinking green arrows at each end while that turn signal is on, or the blind spot icon while that side is "
-              "occupied. Centre it on the speed to frame the number."},
+      "note": ("Blinking green arrows at each end while that turn signal is on, or the blind spot icon while that side is " +
+               "occupied. Centre it on the speed to frame the number.")},
     SWITCHER_WIDGET: {
       "label": "Scene view buttons", "kind": SWITCHER_WIDGET, "width": SWITCHER_SIZE[0], "height": SWITCHER_SIZE[1],
       "default": {"x": 1556, "y": 804, "enabled": True},
-      "note": "VIEW and MODE buttons: tap to cycle the camera angle (Front, Chase, Top) and the visualization "
-              "(Camera, Synthetic, Hybrid). Front + Camera is the normal StarPilot view."},
+      "note": ("VIEW and MODE buttons: tap to cycle the camera angle (Front, Chase, Top) and the visualization " +
+               "(Camera, Synthetic, Hybrid). Front + Camera is the normal StarPilot view.")},
   }
 
 
@@ -84,7 +87,7 @@ def render_turn_signals(state, extra_width: float) -> None:
 def render_switcher(state, extra_width: float, fonts=None) -> None:
   from openpilot.starpilot.ui.viz import controller
   position = _position(state, SWITCHER_WIDGET, extra_width)
-  if position is None or _hidden(state):
+  if position is None or _hidden(state) or controller.projecting():
     controller.shared().controls.hide()
     return
   from openpilot.starpilot.ui.raylib import rl

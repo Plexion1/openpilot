@@ -35,9 +35,6 @@ def _hidden_widgets():
   return document
 
 
-from openpilot.starpilot.ui.viz import settings as scene_view_settings  # noqa: E402
-
-
 class AppearanceSettingsTests(unittest.TestCase):
   def setUp(self):
     temporary = tempfile.TemporaryDirectory()
@@ -55,8 +52,7 @@ class AppearanceSettingsTests(unittest.TestCase):
   def test_absent_defaults_are_read_only_and_match_both_views(self):
     self.assertEqual(onroad_appearance(self.params), OnroadAppearance())
     self.assertEqual(tuple(row.key for row in self.owner.snapshot(Profile.LARGE).rows),
-                     ("DeveloperSidebar", "HidePersonalityAlerts", "ShowBrakeStatus", "BlindSpotMetrics", "SignalMetrics", "TurnByTurn:large",
-                      *scene_view_settings.ROWS, "ReduceMotion"))
+                     ("DeveloperSidebar", "HidePersonalityAlerts", "ShowBrakeStatus", "BlindSpotMetrics", "SignalMetrics", "TurnByTurn:large", "ReduceMotion"))
     self.assertEqual(tuple(row.key for row in self.owner.snapshot(Profile.COMPACT).rows),
                      ("CameraView", "DriverCamera", "StockConfidenceBallWidget", "HidePersonalityAlerts", "ShowBrakeStatus",
                       "HideLeadMarker", "LeadInfo", "SignalMetrics", "BlindSpotMetrics", "TurnByTurn:compact"))

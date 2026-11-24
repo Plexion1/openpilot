@@ -50,8 +50,8 @@ def _smooth(current: float | None, target: float, dt: float, time_constant: floa
 class RigContext:
   rect: tuple[float, float, float, float]
   scene: Scene
-  front: VirtualCamera  # the real road camera as the stock front view shows it
-  dt: float             # seconds since the previous frame, for smoothing
+  front: VirtualCamera | None  # the real road camera as the stock front view shows it (only for rigs that need it)
+  dt: float                    # seconds since the previous frame, for smoothing
 
 
 class Rig:
@@ -65,6 +65,7 @@ class Rig:
   reprojection_stream: str | None = "narrow"
   stop_curtain = True       # draw the stop line's glow wall; it is edge-on from straight above
   upright_signs = True      # stand signs on posts; from straight above they lie flat like map markers
+  needs_front = False       # the rig uses RigContext.front (computed only for rigs that ask for it)
 
   def reset(self) -> None:
     pass
@@ -79,8 +80,10 @@ class FrontRig(Rig):
   lane_half_width = 0.06
   edge_half_width = 0.07
   reprojection_stream = None
+  needs_front = True
 
   def camera(self, ctx: RigContext) -> VirtualCamera:
+    assert ctx.front is not None
     return ctx.front
 
 

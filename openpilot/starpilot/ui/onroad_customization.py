@@ -264,9 +264,9 @@ PROFILES['large']['widgets'][CEM_GAUGE_WIDGET] = _widget('CEM road gauge', CEM_G
                                                          56, 536)
 for _profile, _geometry in {"large": (112, 70, 165, 294), "compact": (45, 28, 220, 12)}.items():
   PROFILES[_profile]["widgets"]["rear_fog"] = _widget("Rear fog indicator", "rear_fog", *_geometry)
-# Scene view widgets (turn signal arrows, VIEW / MODE buttons): comma screen only, StarPort's layout leaves them out.
-from openpilot.starpilot.ui.viz.widgets import (ANCHOR_SHIFT as SCENE_ANCHOR_SHIFT, COLORS as SCENE_WIDGET_COLORS,  # noqa: E402
-                                                COMMA_ONLY_WIDGETS, widget_specs as scene_widget_specs)
+# Scene view widgets: turn signal arrows and the VIEW / MODE buttons (starpilot/ui/viz).
+from openpilot.starpilot.ui.viz.widgets import (ANCHOR_SHIFT as SCENE_ANCHOR_SHIFT, COLORS as SCENE_WIDGET_COLORS,
+                                                SCENE_VIEW_WIDGETS, widget_specs as scene_widget_specs)
 PROFILES["large"]["widgets"].update(scene_widget_specs())
 
 ROAD_BASE_WIDTH = 1860
@@ -282,7 +282,7 @@ for _key, _widget_data in PROFILES["large"]["widgets"].items():
   _widget_data["expandable"] = True
 # Older documents retain every saved placement and gain this independent widget.
 OPTIONAL_WIDGETS = frozenset({WEATHER_WIDGET, MODE_WIDGET, CLOCK_WIDGET, STOPPED_TIMER_WIDGET, CEM_GAUGE_WIDGET,
-                              NAV_CARD_WIDGET, NAV_MAP_WIDGET, JETLINK_WIDGET, SIGNAL_WIDGET, "rear_fog", *COMMA_ONLY_WIDGETS})
+                              NAV_CARD_WIDGET, NAV_MAP_WIDGET, JETLINK_WIDGET, SIGNAL_WIDGET, "rear_fog", *SCENE_VIEW_WIDGETS})
 
 # The torque arc grows when the developer sidebar closes; protect both road widths.
 _torque = PROFILES['large']['widgets']['torque_bar']
@@ -347,7 +347,7 @@ def _fit_legacy_signal(placement: dict, bounds: Bounds) -> None:
 DEFAULT_WIDGET_ORDER = {
   "large": (NAV_MAP_WIDGET, "cruise_limits", CEM_GAUGE_WIDGET, "current_speed",
             "steering_wheel", "torque_bar", "following_distance", "driver_monitor", MODE_WIDGET, CLOCK_WIDGET, WEATHER_WIDGET,
-            STOPPED_TIMER_WIDGET, NAV_CARD_WIDGET, JETLINK_WIDGET, SIGNAL_WIDGET, "rear_fog", *COMMA_ONLY_WIDGETS,
+            STOPPED_TIMER_WIDGET, NAV_CARD_WIDGET, JETLINK_WIDGET, SIGNAL_WIDGET, "rear_fog", *SCENE_VIEW_WIDGETS,
             "pip_left", "pip_right"),
   "compact": ("speed_limit", "max_speed", "steering_wheel", "torque_bar",
               "driver_monitor", *RAIL_WIDGETS, MODE_WIDGET, CLOCK_WIDGET, WEATHER_WIDGET,
@@ -370,13 +370,8 @@ def widget_bounds(profile, widget):
   return PROFILES[profile]["widgets"][widget].get("bounds", PROFILES[profile]["bounds"])
 
 
-def customization_metadata(include_comma_only: bool = False):
-  """Editor metadata. StarPort's layout is built from this without ``include_comma_only``, so its saved documents
-  never gain widgets that only the comma screen draws."""
+def customization_metadata():
   profiles = copy.deepcopy(PROFILES)
-  if not include_comma_only:
-    for key in COMMA_ONLY_WIDGETS:
-      profiles["large"]["widgets"].pop(key, None)
   profiles["large"]["widgets"]["driver_monitor"]["defaultAnchor"] = "driver_side"
   profiles["large"]["widgets"]["following_distance"]["defaultAnchor"] = "driver_side"
   # The editor grows the cruise box by these while speed-limit sources are shown.
@@ -401,7 +396,7 @@ def customization_metadata(include_comma_only: bool = False):
       profile["widgets"][key]["resizable"] = {"min": minimum, "default": default, "max": maximum}
       profile["widgets"][key]["default"]["size"] = default
   for profile, data in profiles.items():
-    data["widgetOrder"] = [key for key in DEFAULT_WIDGET_ORDER[profile] if key in data["widgets"]]
+    data["widgetOrder"] = list(DEFAULT_WIDGET_ORDER[profile])
     data["runtimePreviewWidgets"] = list(RUNTIME_PREVIEW_WIDGETS[profile])
   return {"profiles": profiles, "roadColorFields": [
     {"id": key, "label": label, "default": ROAD_COLORS[key]}

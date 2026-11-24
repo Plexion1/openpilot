@@ -103,7 +103,7 @@ from openpilot.system.ui.lib.application import MouseEvent, MousePos, gui_app
 from openpilot.system.ui.widgets import Widget
 from openpilot.system.ui.widgets.list_view import button_item, text_item, toggle_item
 from openpilot.starpilot.ui.compact_settings_page import StarCompactSettings as StarCompactSettings
-from openpilot.starpilot.ui.viz import controller as scene_views
+from openpilot.starpilot.ui.viz import controller as scene_views, settings as scene_view_settings
 
 NATIVE_SETTINGS_PANELS = (Destination.DEVICE, Destination.SOFTWARE, Destination.BLUETOOTH, Destination.TOGGLES, Destination.DEVELOPER)
 _FEATURE_SETTINGS_PANES = {
@@ -175,6 +175,8 @@ class StarShellSession:
     try:
       self.camera_owner = camera_owner
       self.camera_paint = True
+      if profile == Profile.LARGE:
+        scene_views.install()  # compiles the scene view shaders while parked, so the first switch onroad never stalls
       def camera_layer(rect, state):
         if profile == Profile.COMPACT:
           camera_owner.render_camera_model_layer(rect, camera_view=state.appearance.camera_view,
@@ -190,7 +192,7 @@ class StarShellSession:
                                                  reverse_driver=state.reverse_driver_camera,
                                                  road_style=state.customization["roadColors"]["large"],
                                                  lead_display=(True, int(state.appearance.lead_info_mode), state.appearance.lead_info_metric)
-                                                 if state.appearance.lead_info_mode else None, stop_sign=state.stop_sign_ahead)
+                                                 if state.appearance.lead_info_mode else None)
       self.view = ShellView(self.fonts, Path(__file__).parents[2] / "selfdrive/assets",
                             camera_layer=camera_layer,
                             pip_layer=self._render_pip)
@@ -832,6 +834,8 @@ class StarShellSession:
 
   def appearance_snapshot(self):
     state = self.pip_snapshot() if getattr(self, "appearance_page", "appearance") == "pip" else self.appearance_owner.snapshot(self.profile)
+    if self.profile == Profile.LARGE and state.page == "appearance":
+      state = replace(state, rows=(*state.rows, *scene_view_settings.rows(state.parked)))  # scene views draw on the Big layout
     return value_editor_state(state, getattr(self, "appearance_edit_key", None)) if self.profile == Profile.LARGE else state
 
   def pip_snapshot(self):

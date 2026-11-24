@@ -1,9 +1,10 @@
 """Scene view preferences as StarPilot settings rows.
 
-AppearanceOwner includes these rows, so they appear on the device's Onroad HUD settings page, on Galaxy's Visual
-settings page and, grouped under "Scene views", in Galaxy's onroad layout editor. They are saved in the scene view
-document (options.py), not in Params, and follow the same rules as the other appearance rows: editable while parked,
-and a save is refused when the document changed since the row was read.
+The rows appear on the device's Onroad HUD settings page (StarShellSession.appearance_snapshot adds them on the Big
+layout), on Galaxy's Visual settings page and, grouped under "Scene views", in Galaxy's onroad layout editor (both via
+AppearanceOwner's include_large rows); AppearanceOwner.apply routes their changes here. They are saved in the scene
+view document (options.py), not in Params, and follow the same rules as the other appearance rows: editable while
+parked, and a save is refused when the document changed since the row was read.
 """
 from __future__ import annotations
 
@@ -20,11 +21,11 @@ MAX_BYTES = 4096
 # key -> (label, document field, {label: stored value}, description)
 ROWS = {
   PREFIX + "angle": ("Scene view angle", "angle", {label: value.value for value, label in ANGLE_LABELS.items()},
-                     "Camera angle for the driving screen: Front is the road camera, Chase follows from above and behind, "
-                     "Top looks straight down. Front with the Camera mode is the normal StarPilot view."),
+                     ("Camera angle for the driving screen: Front is the road camera, Chase follows from above and behind, " +
+                      "Top looks straight down. Front with the Camera mode is the normal StarPilot view.")),
   PREFIX + "mode": ("Scene view mode", "mode", {label: value.value for value, label in MODE_LABELS.items()},
-                    "Camera shows the road camera; Synthetic draws the road, lanes, path and vehicles from the driving "
-                    "model only; Hybrid adds lane paint found in the camera image to the synthetic road."),
+                    ("Camera shows the road camera; Synthetic draws the road, lanes, path and vehicles from the driving " +
+                     "model only; Hybrid adds lane paint found in the camera image to the synthetic road.")),
   PREFIX + "egoModel": ("Your vehicle", "egoModel", {label: value.value for value, label in VEHICLE_LABELS.items()},
                         "How your car is drawn in the Chase and Top scene views."),
   PREFIX + "egoColor": ("Your vehicle color", "egoColor", {name: name for name in COLORS},

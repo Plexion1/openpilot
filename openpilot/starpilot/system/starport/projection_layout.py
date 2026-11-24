@@ -16,6 +16,7 @@ from openpilot.starpilot.ui.onroad_torque_geometry import maximum_footprint
 from openpilot.starpilot.ui.onroad_customization import (SPEED_LAYOUT_V7, migrate_speed_layout, migrate_large_sign_layout,
                                                         migrate_confirmation_layout)
 from openpilot.starpilot.ui.large_speed_geometry import sources_extent
+from openpilot.starpilot.ui.viz.widgets import SWITCHER_WIDGET as SCENE_VIEW_SWITCHER, TURN_SIGNAL_WIDGET as TURN_SIGNALS
 
 MAX_BYTES = 16384
 DOCUMENT_KEY = 'projection'
@@ -44,7 +45,7 @@ CARD_WIDGETS = {NOW_PLAYING_WIDGET: NOW_PLAYING_OPACITY, JETLINK_WIDGET: JETLINK
 # StarPort widgets the comma also draws as real editor sprites; the map stays a sketch.
 SPRITE_WIDGETS = (NAV_CARD, *DISPLAY_WIDGETS, STOPPED_TIMER_WIDGET, NOW_PLAYING_WIDGET, JETLINK_WIDGET, SIGNAL_WIDGET, CAR_EXIT)
 PROJECTION_WIDGETS = (NAV_CARD, NAV_MAP, *DISPLAY_WIDGETS, STOPPED_TIMER_WIDGET, NOW_PLAYING_WIDGET, JETLINK_WIDGET, SIGNAL_WIDGET, CAR_EXIT,
-                      'following_distance')
+                      'following_distance', TURN_SIGNALS, SCENE_VIEW_SWITCHER)
 
 
 class ProjectionLayoutSource:
@@ -84,6 +85,10 @@ def layout_metadata_for_viewport(viewport):
   widgets['current_speed']['default']['x'] += (width - 1860) / 2
   widgets[MODE_WIDGET]['default']['x'] += (width - 1860) / 2
   widgets[CLOCK_WIDGET]['default']['x'] += (width - 1860) / 2
+  widgets[TURN_SIGNALS]['default']['x'] += (width - 1860) / 2
+  # The car screen keeps the stock camera view; scene views and their VIEW / MODE buttons are comma-screen features.
+  widgets[SCENE_VIEW_SWITCHER].update(hidden=True)
+  widgets[SCENE_VIEW_SWITCHER]['default'].update(x=widgets[SCENE_VIEW_SWITCHER]['default']['x'] + width - 1860, enabled=False)
   widgets['steering_wheel']['default']['x'] += width - 1860
   widgets[SIGNAL_WIDGET]['default']['x'] += width - 1860
   widgets['driver_monitor']['default']['y'] += height - 1080
@@ -475,6 +480,7 @@ def projection_customization(document, base_customization):
   shifts = {'current_speed': ((width - 1860) / 2, 0),
             MODE_WIDGET: ((width - 1860) / 2, 0),
             CLOCK_WIDGET: ((width - 1860) / 2, 0),
+            TURN_SIGNALS: ((width - 1860) / 2, 0), SCENE_VIEW_SWITCHER: (width - 1860, 0),
             'steering_wheel': (width - 1860, 0), 'driver_monitor': (0, height - 1080),
             NAV_CARD: (width - 1860, 0), NAV_MAP: (width - 1860, 0)}
   native = PROFILES['large']['widgets']

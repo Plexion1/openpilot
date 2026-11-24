@@ -11,8 +11,10 @@ Hooks (a few lines in existing files):
 GPU budget: the driving model shares the GPU with the UI, so the 3D scene is drawn at RENDER_SCALE resolution into
 an offscreen image during StarPilot's render-prepare step (gui_app.add_render_prepare, outside the frame, like the
 torque bar and the map overlay) and the camera layer only stretches that image over its rectangle. StarPilot's
-widgets, text and borders are still drawn at full resolution on top. The first frame after switching views is drawn
-directly while the offscreen path warms up.
+widgets, text and borders are still drawn at full resolution on top. On the frame a scene view is switched on, the
+stock layer draws once while the first offscreen image is prepared; when only the angle or mode changes, the previous
+image shows for that one frame. Shaders take a while to compile on first use, so after a scene view has been used once
+they are compiled while the car is off, one per frame, and switching views onroad never stalls the UI.
 
 The time spent is reported through the UI's frame phases like the stock layer: camera polling as "camera", the
 scene and its drawing as "model", so slow frame diagnostics compare directly.
@@ -30,7 +32,7 @@ from openpilot.starpilot.ui.viz.controls import VizControls
 from openpilot.starpilot.ui.viz.options import SelectionStore, VizMode, VizSelection
 from openpilot.starpilot.ui.viz.renderer import VizRenderer
 from openpilot.starpilot.ui.viz.rigs import RIGS, RigContext, stock_front_camera
-from openpilot.starpilot.ui.viz.scene import SceneTracker, StopSignTracker
+from openpilot.starpilot.ui.viz.scene import SceneTracker, StopSignTracker, noted_stop_sign
 
 # AugmentedRoadView camera_view values (appearance CameraView param) that keep the stock layer.
 CAMERA_VIEW_DRIVER, CAMERA_VIEW_NONE = 1, 4
@@ -42,6 +44,9 @@ GUARD_SCALES = (RENDER_SCALE, 0.35, 0.25)
 GUARD_DROP_PERCENT = 2.0  # modelV2.frameDropPerc (a filtered percentage; 0 when the model keeps up)
 GUARD_SETTLE = 6.0        # s between steps, so the filtered drop rate can respond to the previous one
 GUARD_PAUSE = 60.0        # s of stock view once the lowest resolution was not enough
+
+WARM_UP_DELAY = 10.0      # s after UI start before shaders are compiled (offroad, once a scene view has been used)
+WARM_UP_SPACING = 1.0     # s between programs, so the offroad UI never stalls for long
 
 
 def _phase(name: str, callback, *args):
@@ -84,11 +89,17 @@ class SceneViews:
     self._job: _Job | None = None
     self._job_serial = 0       # bumps on every camera layer call
     self._prepared_serial = -1  # job serial the last prepare consumed
+    self._prepare_seen = -1    # job serial at the last prepare call (prepare runs every frame when installed)
     self._ready: tuple | None = None  # (selection, rect) of the offscreen image drawn by this frame's prepare
     self._target = None
     self._guard_step = 0
     self._guard_next = 0.0     # monotonic time of the next allowed step
     self._paused_until = 0.0
+    self.prepare_step = False  # set once gui_app runs prepare() every frame; without it frames are drawn directly
+    self.warm_up_allowed = None  # callable: True when compiling shaders now cannot stall driving (shared() sets it)
+    self.warm_up_egl: bool | None = None  # camera frame format to compile the camera program for
+    self._warm = False
+    self._warm_next = time.monotonic() + WARM_UP_DELAY
 
   def selection(self) -> VizSelection:
     return self.store.get()
@@ -109,6 +120,7 @@ class SceneViews:
     """
     self._job = None
     if self.failed or projection or self.paused:
+      self._ready = None
       return False
     selection = self.store.get()
     if selection.stock or camera_view in (CAMERA_VIEW_DRIVER, CAMERA_VIEW_NONE) or reverse_driver:
@@ -120,14 +132,16 @@ class SceneViews:
     self._job = _Job(view, key[1], sm, selection, camera_view, reverse_driver, poll_camera, started_frame, status,
                      color_strength, road_style, stop_sign, clock or ((lambda: now) if now else None))
     try:
-      if self._ready == key and self._target is not None:
+      if self._ready is not None and self._target is not None:
+        # this frame's offscreen image (the previous angle or mode for one frame right after a switch)
         self._ready = None
         texture = self._target.texture
         rl.draw_texture_pro(texture, rl.Rectangle(0, 0, float(texture.width), -float(texture.height)), rect, rl.Vector2(0, 0), 0.0,
                             rl.WHITE)
-      else:
-        # Not prepared offscreen this frame (just switched, or no prepare step): draw it directly once.
-        self._render(self._job, rect, None)
+        return True
+      if self.prepare_step and self._job_serial - self._prepare_seen <= 2:
+        return False  # just switched on: the stock layer covers this one frame, the next prepare step draws the scene
+      self._render(self._job, rect, None)  # no prepare step running (previews, tests): draw directly at full resolution
     except Exception:
       self._fail("render failed")
       return False
@@ -135,12 +149,15 @@ class SceneViews:
 
   def prepare(self) -> None:
     """gui_app render-prepare step: draw the scene the camera layer will show this frame into the offscreen image."""
+    self._prepare_seen = self._job_serial
     job = self._job
     if job is None or self.failed or self._prepared_serial == self._job_serial:
-      self._ready = None
-      return  # the camera layer did not ask for a scene view last frame
+      self._ready = None  # the camera layer did not ask for a scene view last frame
+      self._warm_up()
+      return
     self._prepared_serial = self._job_serial
-    self._guard(job.sm)
+    if self._guard(job.sm):
+      return
     x, y, w, h = job.rect
     size = (max(int(round(w * self.render_scale)), 1), max(int(round(h * self.render_scale)), 1))
     try:
@@ -160,24 +177,40 @@ class SceneViews:
     except Exception:
       self._fail("offscreen render failed")
 
-  def _guard(self, sm) -> None:
-    """Back off when the driving model is losing frames while we draw (see GUARD_*)."""
+  def _warm_up(self) -> None:
+    """Compile one missing shader every WARM_UP_SPACING while offroad, once a scene view has been used on this device."""
+    if self._warm or self.failed or self.warm_up_allowed is None:
+      return
+    now = time.monotonic()
+    if now < self._warm_next:
+      return
+    self._warm_next = now + WARM_UP_SPACING
+    try:
+      if self.warm_up_allowed() and self.store.path.exists():
+        self._warm = self.renderer.warm_up(self.warm_up_egl)
+    except Exception:
+      cloudlog.exception("scene views: shader warm-up failed")
+      self._warm = True  # compile on first use instead
+
+  def _guard(self, sm) -> bool:
+    """Back off when the driving model is losing frames while we draw (see GUARD_*). True when it just paused."""
     try:
       drop = float(sm["modelV2"].frameDropPerc) if sm.seen["modelV2"] else 0.0
     except (KeyError, AttributeError):
-      return
+      return False
     now = time.monotonic()
     if drop <= GUARD_DROP_PERCENT or now < self._guard_next:
-      return
+      return False
     self._guard_next = now + GUARD_SETTLE
     if self._guard_step + 1 < len(GUARD_SCALES):
       self._guard_step += 1
       self.render_scale = min(self.render_scale, GUARD_SCALES[self._guard_step])
       cloudlog.warning(f"scene views: model dropping {drop:.1f}% of frames, drawing at {self.render_scale:.2f} resolution")
-    else:
-      self._paused_until = now + GUARD_PAUSE
-      self._job, self._ready = None, None
-      cloudlog.warning(f"scene views: model still dropping {drop:.1f}% of frames, showing the stock view for {GUARD_PAUSE:.0f} s")
+      return False
+    self._paused_until = now + GUARD_PAUSE
+    self._job, self._ready, self._last_time = None, None, None
+    cloudlog.warning(f"scene views: model still dropping {drop:.1f}% of frames, showing the stock view for {GUARD_PAUSE:.0f} s")
+    return True
 
   def _fail(self, what: str) -> None:
     # Never take the driving UI down: log once and fall back to the stock layer for this session.
@@ -216,7 +249,7 @@ class SceneViews:
         scene.stop_sign = self.stop_signs.update(job.stop_sign, feed.road_view_from_calib(), scene.height, scene.v_ego, dt)
       source = feed.geometry()
       r = job.rect
-      front = stock_front_camera(source.intrinsics, source.view_from_calib, r, source.wide)
+      front = stock_front_camera(source.intrinsics, source.view_from_calib, r, source.wide) if rig.needs_front else None
       camera = rig.camera(RigContext(r, scene, front, dt))
       if scale is not None:
         camera = camera.reframed(r, scale)
@@ -266,27 +299,48 @@ def shared() -> SceneViews:
   if _shared is None:
     _shared = SceneViews()
     try:
+      from openpilot.common.hardware import COMMA_HARDWARE
       from openpilot.system.ui.lib.application import gui_app
       gui_app.add_render_prepare(_shared.prepare, _shared.close)
+      _shared.prepare_step = True
+      _shared.warm_up_allowed = _offroad
+      _shared.warm_up_egl = bool(COMMA_HARDWARE)  # CameraView uses EGL frames on comma hardware
     except Exception:
       cloudlog.exception("scene views: no render-prepare step, drawing scene views directly")
   return _shared
+
+
+def _offroad() -> bool:
+  from openpilot.selfdrive.ui.ui_state import ui_state
+  return not ui_state.started and ui_state.replay_clock is None
+
+
+def install() -> None:
+  """Create the shared instance at UI start so its prepare step can compile shaders before the first drive."""
+  try:
+    shared()
+  except Exception:
+    cloudlog.exception("scene views: install failed")
 
 
 # ---- glue for the existing UI; ui_state is imported lazily so the classes above stay testable off-device
 
 
 def render_layer(view, rect: rl.Rectangle, *, camera_view: int, reverse_driver: bool, poll_camera: bool,
-                 road_style: dict | None = None, stop_sign: tuple | None = None) -> bool:
+                 road_style: dict | None = None) -> bool:
   """AugmentedRoadView hook. True when a scene view was drawn instead of the stock layer."""
   from openpilot.selfdrive.ui.ui_state import ui_state
   from openpilot.starpilot.ui.camera_color import road_color_strength
-  # StarPort's car display renders this layer in its own read-only process; it keeps the stock view for now.
-  projection = ui_state.projection_read_only and ui_state.replay_clock is None
   return shared().render(view, rect, ui_state.sm, camera_view=camera_view, reverse_driver=reverse_driver, poll_camera=poll_camera,
                          started_frame=ui_state.started_frame, status=ui_state.status.value,
-                         color_strength=lambda: road_color_strength(ui_state), projection=projection, road_style=road_style,
-                         stop_sign=stop_sign, clock=lambda: ui_state.display_time_ns() / 1e9)
+                         color_strength=lambda: road_color_strength(ui_state), projection=projecting(), road_style=road_style,
+                         stop_sign=noted_stop_sign(), clock=lambda: ui_state.display_time_ns() / 1e9)
+
+
+def projecting() -> bool:
+  """StarPort's car display (its own read-only process) keeps the stock camera view for now."""
+  from openpilot.selfdrive.ui.ui_state import ui_state
+  return bool(ui_state.projection_read_only) and ui_state.replay_clock is None
 
 
 def render_switcher(x: float, y: float, fill=None, border=None, text=None, fonts=None) -> None:

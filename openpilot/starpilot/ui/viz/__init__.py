@@ -21,8 +21,9 @@ What the scene shows
   * the lane being changed into, tinted blue (red while that blind spot is occupied)
   * a glowing red stop line where the model wants to stop (modelV2.action.shouldStop at the predicted stopping point)
   * a stop sign beside the road while StarPilot shows its STOP icon: the same confirmed sighting and distance StarPilot
-    already computes (runtime_snapshot -> OnroadState.stop_sign_ahead -> camera layer), placed once and then kept on
-    the road from our own travel; nothing is detected or matched again. In the top view it lies flat like a map marker
+    already computes (runtime_snapshot hands it over with scene.note_stop_sign each frame), placed once and then kept
+    on the road from our own travel; nothing is detected or matched again. In the top view it lies flat like a map
+    marker
   * the path in StarPilot's path style (acceleration, solid colour or rainbow) and custom lane line colours
   * our engagement status as a soft glow under the car
 
@@ -31,17 +32,19 @@ How it hooks into StarPilot (a few lines in existing files)
     draws instead of the stock camera + model layer, so every StarPilot widget, alert and border still draws on top.
     The same layer is used by StarPilot's on-device replay, which therefore shows the selected view too.
   * Two onroad widgets in StarPilot's layout system (widgets.py), placed, hidden, recoloured and layered from Galaxy's
-    layout editor: the VIEW / MODE buttons (bottom right by default) and turn signal arrows beside the speed. They are
-    comma-screen only; StarPort's own layout leaves them out. Taps reach the buttons only when no StarPilot control
-    claimed the touch (StarShellPage, just before a tap would toggle the sidebar).
-  * Settings rows through AppearanceOwner (settings.py): angle, mode and the look of our car and the lead vehicles, on
-    the device's Onroad HUD page, Galaxy's settings and the layout editor ("Scene views").
+    layout editor: the VIEW / MODE buttons (bottom right by default) and turn signal arrows beside the speed. StarPort's
+    car-screen layout has them too: the arrows draw there; the car screen keeps the stock camera view, so its VIEW /
+    MODE buttons stay hidden. Taps reach the buttons only when no StarPilot control claimed the touch (StarShellPage,
+    just before a tap would toggle the sidebar).
+  * Settings rows (settings.py): angle, mode and the look of our car and the lead vehicles, on the device's Onroad HUD
+    page, Galaxy's settings and the layout editor ("Scene views").
+  * StarShellSession creates the shared instance at start (controller.install), so the shaders compile while parked.
   * Choices are saved in /data/starpilot/scene_views.json (options.py), e.g.
       {"angle": "chase", "mode": "synthetic", "egoModel": "car", "egoColor": "Ocean Blue", "leadModel": "truck"}
     Params keys are compiled into the prebuilt branch, so a file is used instead; the UI picks changes up within two
     seconds.
-  * Only .py files under the UI runtime roots and Galaxy web files changed, so the prebuilt receipt stays valid and
-    nothing is rebuilt.
+  * Nothing native changed, so nothing is rebuilt. StarPort's projection_layout.py is outside the UI roots that
+    StarPilot's Fast Update may replace, so an update carrying it installs as a full validated update.
 
 Cost
   The driving model runs on the same GPU, so the GPU budget is what matters most.
@@ -49,8 +52,9 @@ Cost
   ground pass with cheap per-pixel work away from the road, and a ray-marched quad per vehicle sized to it), then
   stretched over the camera layer. A guard watches modelV2.frameDropPerc and lowers the resolution, then falls back to
   the stock view for a minute, if the model starts losing frames while a scene view is on (controller.GUARD_*).
-  CPU: a few dozen uniform uploads and one draw call for the ground plus one per vehicle; road geometry is resampled
-  and uploaded once per model frame. Reported under the UI's "camera" and "model" frame phases like the stock layer.
+  CPU: one packed uniform upload and one draw call for the ground, one of each for all vehicles; road geometry is
+  resampled and uploaded once per model frame. Reported under the UI's "camera" and "model" frame phases like the stock
+  layer. Shaders are compiled while the car is off (once a scene view has been used), so switching never stalls.
 
 Safety
   Driving functions are untouched; this only changes what the camera layer paints. Any exception while drawing a scene

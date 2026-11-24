@@ -98,8 +98,8 @@ class AppearanceOwner:
                           source=raw, choices=("Off", "On"), available=parked and document is not None, default_value="On",
                           reason="On the comma screen only; StarPort has its own layout" if document is not None else
                                  "Repair the saved layout in Colors & Layout"),)
-    if profile == Profile.LARGE or include_large:
-      rows += scene_view_settings.rows(parked)  # scene views draw on the Big layout only
+    if include_large:
+      rows += scene_view_settings.rows(parked)  # Galaxy; the comma's own page adds them in StarShellSession
     if profile == Profile.LARGE:
       rows += (FeatureRow('ReduceMotion', 'Reduce Quick Select motion',
                           ('On' if document.get('reduceMotion') else 'Off') if document is not None else 'Unavailable', source=raw,

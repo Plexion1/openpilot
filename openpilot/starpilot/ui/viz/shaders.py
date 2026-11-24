@@ -1,15 +1,16 @@
 """GLSL for the scene views.
 
 Ground pass: one full-layer quad. Every pixel intersects its view ray with the road plane and is shaded there, so the
-cost does not depend on how much road is visible and the CPU only uploads a few uniforms per frame. Everything that
+cost does not depend on how much road is visible and the CPU uploads one packed array per frame. Everything that
 lies on the road is drawn in this pass from small sampled arrays: road surface, lane lines (dashed lines scroll with
 the distance driven), road edges, the planned path, the lane change highlight, the stop line, vehicle shadows,
 headlight beams and brake light glow. The camera variant samples the road camera at that road point (inverse
 perspective mapping); on comma hardware the frame is an EGL external image (zero copy, like CameraView), elsewhere it
 arrives as separate Y and UV textures.
 
-Vehicle pass: one small quad per vehicle, ray marched against a signed distance model of a car, pickup truck or
-sphere, with paint, glass, tyres and working lights. Edges are antialiased from the closest approach of the ray.
+Vehicle pass: one small quad per vehicle, all in one draw call, ray marched against a signed distance model of a car,
+pickup truck or sphere (or the stop sign), with paint, glass, tyres and working lights. Edges are antialiased from the
+closest approach of the ray.
 """
 import platform
 
@@ -34,48 +35,72 @@ void main() {
 SAMPLES = 24       # must match scene.SAMPLES
 MAX_BODIES = 4     # shadows / glows in the ground pass (our car + up to three others)
 
+# Ground pass inputs, packed so the CPU uploads one vec4 array per frame (FRAME_*) plus the road samples once per model
+# frame and the colours (LOOK_*) only when the style changes. Slots are vec4 indices; shaders and renderer share them.
+F_RAY = 0          # 3 slots: columns of the (u, v, 1) -> view ray matrix; w holds the virtual camera position
+F_MISC = 3         # road plane z, odometer (m driven, scrolls dashes and grid), time (s, pulses), unused
+F_DASH = 4         # per lane line: 1 dashed, 0 solid
+F_PATH = 5         # range: start, end (m), alpha, colour mode (0 throttle, 1 solid, 2 acceleration, 3 rainbow)
+F_PATH_NEAR = 6
+F_PATH_FAR = 7
+F_CHANGE = 8       # lane change: direction (-1 left, 1 right), strength, blind spot occupied, unused
+F_STOP = 9         # stop line: distance, strength
+F_LIGHT = 10       # darkness, headlights, our front bumper x, unused
+F_GLOW = 11        # our car's engagement colour under it, a = strength
+F_POSE = 12        # MAX_BODIES slots: shadow/glow centre x, y, cos(yaw), sin(yaw)
+F_SIZE = F_POSE + MAX_BODIES  # MAX_BODIES slots: half length, half width, shadow strength, tail glow
+F_LANE_ALPHA = F_SIZE + MAX_BODIES  # per lane line (model probability x style)
+F_EDGE = F_LANE_ALPHA + 1  # alpha of the left/right road edge, edge half width, lane line half width
+F_TEX = F_EDGE + 1        # camera modes, 3 slots: columns of road (X, Y, 1) -> homogeneous texture uv
+F_CAM_LIMITS = F_TEX + 3  # nearest usable road distance, distance fade start/end, lowest usable v (hood)
+F_CAM_MISC = F_CAM_LIMITS + 1  # mode (1 camera colour, 2 hybrid), colour strength
+FRAME_SLOTS = F_CAM_MISC + 1
+
+L_SKY_TOP, L_SKY_HORIZON, L_GROUND, L_GRID, L_ROAD, L_LANE_INNER, L_LANE_OUTER, L_MISC, L_PAINT_WHITE, L_PAINT_YELLOW = range(10)
+LOOK_SLOTS = 10    # L_MISC: path half width, sample max x, fog distance, unused
+
 # Shared by both ground shaders. Ray directions and positions are in the calib frame (x forward, y right, z down).
 _GROUND_COMMON = f"""
 #define SAMPLES {SAMPLES}
 #define MAX_BODIES {MAX_BODIES}
-""" + """
 in vec2 fragTexCoord;
 in vec4 fragColor;
 out vec4 finalColor;
 
-uniform vec3 uvToRay[3];    // columns: (u, v, 1) over the layer -> view ray
-uniform vec3 camPos;        // virtual camera position
-uniform float groundZ;      // road plane
-uniform float odometer;     // metres driven, scrolls the dashes and the grid
-uniform float time;         // seconds, for pulses
-uniform float fogDistance;
-uniform vec4 skyTop;
-uniform vec4 skyHorizon;
-uniform vec4 groundColor;
-uniform vec4 gridColor;     // rgb, a = strength
-uniform vec4 roadColor;     // surface between the road edges; a = 0 when there are none
-
+uniform vec4 frameData[{FRAME_SLOTS}];
+uniform vec4 look[{LOOK_SLOTS}];
 // Road geometry sampled at x_i = sampleMaxX * (i / (SAMPLES - 1))^2
 uniform vec4 laneY[SAMPLES];  // y of the four lane lines
 uniform vec4 roadY[SAMPLES];  // left edge y, right edge y, path y, planned acceleration
-uniform float sampleMaxX;
 
-uniform vec4 laneAlpha;     // per lane line (model probability x style)
-uniform vec4 laneDash;      // 1 dashed, 0 solid
-uniform vec4 laneInner;     // colour of the lines beside our lane, a = strength
-uniform vec4 laneOuter;     // colour of the outer lines
-uniform vec4 edgeStyle;     // xy: alpha of the left/right road edge, z: half width, w: lane line half width
-uniform vec4 pathRange;     // x: start, y: end (m), z: alpha, w: colour mode (0 throttle, 1 solid, 2 acceleration, 3 rainbow)
-uniform vec4 pathNear;
-uniform vec4 pathFar;
-uniform float pathHalfWidth;
-uniform vec4 laneChange;    // x: direction (-1 left, 1 right), y: strength, z: blocked, w: unused
-uniform vec4 stopLine;      // x: distance, y: strength
-uniform vec4 lighting;      // x: darkness, y: headlights, z: our front bumper x, w: unused
-uniform vec4 bodyPose[MAX_BODIES];   // shadow/glow centre x, y, cos(yaw), sin(yaw)
-uniform vec4 bodySize[MAX_BODIES];   // half length, half width, shadow strength, tail glow
-uniform vec4 statusGlow;    // our car's engagement colour under it, a = strength
-
+#define uvToRay mat3(frameData[{F_RAY}].xyz, frameData[{F_RAY + 1}].xyz, frameData[{F_RAY + 2}].xyz)
+#define camPos vec3(frameData[{F_RAY}].w, frameData[{F_RAY + 1}].w, frameData[{F_RAY + 2}].w)
+#define groundZ frameData[{F_MISC}].x
+#define odometer frameData[{F_MISC}].y
+#define clockTime frameData[{F_MISC}].z
+#define laneDash frameData[{F_DASH}]
+#define pathRange frameData[{F_PATH}]
+#define pathNear frameData[{F_PATH_NEAR}]
+#define pathFar frameData[{F_PATH_FAR}]
+#define laneChange frameData[{F_CHANGE}]
+#define stopLine frameData[{F_STOP}]
+#define lighting frameData[{F_LIGHT}]
+#define statusGlow frameData[{F_GLOW}]
+#define bodyPose(i) frameData[{F_POSE} + (i)]
+#define bodySize(i) frameData[{F_SIZE} + (i)]
+#define laneAlpha frameData[{F_LANE_ALPHA}]
+#define edgeStyle frameData[{F_EDGE}]
+#define skyTop look[{L_SKY_TOP}]
+#define skyHorizon look[{L_SKY_HORIZON}]
+#define groundColor look[{L_GROUND}]
+#define gridColor look[{L_GRID}]
+#define roadColor look[{L_ROAD}]
+#define laneInner look[{L_LANE_INNER}]
+#define laneOuter look[{L_LANE_OUTER}]
+#define pathHalfWidth look[{L_MISC}].x
+#define sampleMaxX look[{L_MISC}].y
+#define fogDistance look[{L_MISC}].z
+""" + """
 const vec3 HEADLIGHT = vec3(1.0, 0.93, 0.78);
 const vec3 TAIL = vec3(1.0, 0.12, 0.08);
 
@@ -143,7 +168,7 @@ float fogAmount(float distance) {
 // Every pixel's view ray and where it meets the road (also for sky pixels, so the screen derivatives taken right after
 // stay in uniform control flow; the caller then sends the sky to skyColor).
 bool groundRay(out vec3 dir, out vec3 p, out float t) {
-  dir = normalize(mat3(uvToRay[0], uvToRay[1], uvToRay[2]) * vec3(fragTexCoord, 1.0));
+  dir = normalize(uvToRay * vec3(fragTexCoord, 1.0));
   t = (groundZ - camPos.z) / max(dir.z, 1e-4);
   p = camPos + dir * t;
   return dir.z >= 1e-4 && t > 0.0;
@@ -207,7 +232,7 @@ vec3 roadDecals(vec3 color, vec2 p, vec2 dpx, vec2 dpy, vec4 lanes, vec4 road, v
     float b = laneChange.x < 0.0 ? lanes.y : lanes.w;
     float lane = band(p.y, min(a, b), max(a, b), 0.25) * band(p.x, 3.0, 55.0, 4.0);
     vec3 tint = laneChange.z > 0.5 ? vec3(1.0, 0.22, 0.18) : vec3(0.28, 0.72, 1.0);
-    float flow = 0.75 + 0.25 * sin((p.x - time * 18.0) * 0.35);
+    float flow = 0.75 + 0.25 * sin((p.x - clockTime * 18.0) * 0.35);
     color = mix(color, tint, lane * laneChange.y * 0.32 * flow);
   }
 
@@ -230,7 +255,7 @@ vec3 roadDecals(vec3 color, vec2 p, vec2 dpx, vec2 dpy, vec4 lanes, vec4 road, v
     float t = clamp((p.x - pathRange.x) / max(pathRange.y - pathRange.x, 1.0), 0.0, 1.0);
     vec4 c = mix(pathNear, pathFar, t);
     if (pathRange.w > 2.5) {
-      c = vec4(hsl(fract(p.x / 45.0 - time * 0.15), 0.9, 0.6), mix(0.55, 0.1, t));
+      c = vec4(hsl(fract(p.x / 45.0 - clockTime * 0.15), 0.9, 0.6), mix(0.55, 0.1, t));
     } else if (pathRange.w > 1.5) {
       float accel = road.w;
       float sat = min(abs(accel * 1.5), 1.0);
@@ -252,7 +277,7 @@ vec3 roadDecals(vec3 color, vec2 p, vec2 dpx, vec2 dpy, vec4 lanes, vec4 road, v
     float dx = p.x - stopLine.x;
     float fw = max(fx, 1e-4);
     float bar = 1.0 - smoothstep(0.22 - fw, 0.22 + fw, abs(dx));
-    float halo = exp(-abs(dx) * 1.1) * (0.8 + 0.2 * sin(time * 4.5));
+    float halo = exp(-abs(dx) * 1.1) * (0.8 + 0.2 * sin(clockTime * 4.5));
     vec3 red = vec3(1.0, 0.13, 0.1);
     color = mix(color, red, bar * across * stopLine.y);
     color += red * halo * across * stopLine.y * 0.45;
@@ -260,8 +285,8 @@ vec3 roadDecals(vec3 color, vec2 p, vec2 dpx, vec2 dpy, vec4 lanes, vec4 road, v
 
   // shadows under vehicles, their tail light glow at night or when braking, and our engagement colour
   for (int i = 0; i < MAX_BODIES; i++) {
-    vec4 pose = bodyPose[i];
-    vec4 size = bodySize[i];
+    vec4 pose = bodyPose(i);
+    vec4 size = bodySize(i);
     if (size.x <= 0.0) {
       break;  // bodies are packed from slot 0
     }
@@ -300,23 +325,21 @@ void main() {
 }
 """
 
-_CAMERA_GROUND = _GROUND_COMMON + """
-uniform vec3 groundToTex[3];  // columns: (X, Y, 1) on the road -> homogeneous texture uv of the real camera
-uniform vec4 camLimits;       // x: nearest usable road distance, y/z: distance fade start/end, w: lowest usable v (hood)
-uniform int mode;             // 1: camera colour, 2: hybrid (synthetic road + markings found in the camera)
-uniform float colorStrength;
-uniform vec4 paintWhite;
-uniform vec4 paintYellow;
-
-ROAD_COLOR
-
+_CAMERA_GROUND = _GROUND_COMMON + f"""
+#define groundToTex mat3(frameData[{F_TEX}].xyz, frameData[{F_TEX + 1}].xyz, frameData[{F_TEX + 2}].xyz)
+#define camLimits frameData[{F_CAM_LIMITS}]
+#define cameraMode int(frameData[{F_CAM_MISC}].x + 0.5)
+#define colorStrength frameData[{F_CAM_MISC}].y
+#define paintWhite look[{L_PAINT_WHITE}]
+#define paintYellow look[{L_PAINT_YELLOW}]
+""" + """
 vec2 texAt(vec2 g) {
-  vec3 c = mat3(groundToTex[0], groundToTex[1], groundToTex[2]) * vec3(g, 1.0);
+  vec3 c = groundToTex * vec3(g, 1.0);
   return c.xy / max(c.z, 1e-6);
 }
 
 float cameraWeight(vec2 g, out vec2 uv) {
-  vec3 c = mat3(groundToTex[0], groundToTex[1], groundToTex[2]) * vec3(g, 1.0);
+  vec3 c = groundToTex * vec3(g, 1.0);
   uv = c.xy / max(c.z, 1e-6);
   if (c.z <= 1e-4 || g.x < camLimits.x) {
     return 0.0;
@@ -350,7 +373,7 @@ void main() {
   bool synthetic = true;
   if (w > 0.0) {
     vec3 cam = cameraRgb(uv);
-    if (mode == 1) {
+    if (cameraMode == 1) {
       color = mix(color, road_color(cam, colorStrength), w);
       synthetic = w < 0.5;
     } else {
@@ -399,7 +422,7 @@ def camera_ground_shader(egl: bool, road_color: str) -> str:
   """Fragment shader for camera/hybrid modes. ``road_color`` supplies ``vec3 road_color(vec3, float)``."""
   header = EGL_VERSION if egl else VERSION
   sampler = _EGL_SAMPLER if egl else _YUV_SAMPLER
-  return header + _CAMERA_GROUND.replace("ROAD_COLOR", sampler + road_color)
+  return header + sampler + road_color + _CAMERA_GROUND
 
 
 # ---- vehicles
@@ -407,22 +430,47 @@ def camera_ground_shader(egl: bool, road_color: str) -> str:
 # Model ids (renderer.VEHICLE_MODELS): 0 car, 1 pickup truck, 2 sphere, 3 stop sign, 4 stop sign lying flat (a map marker
 # for the top view). Local frame: x forward, y right, z UP, metres, origin at the centre of the footprint on the road
 # (the foot of the post for the sign).
-VEHICLE_SHADER = VERSION + """
+# Vehicle pass inputs: one vec4 array per frame. A header (V_*) shared by every quad, then BODY_SLOTS per drawn body; each
+# quad finds its body from its vertex colour (red = body index), so all vehicles go out in a single draw call.
+V_RAY = 0          # 3 slots: columns of the (u, v, 1) -> view ray matrix; w holds the virtual camera position
+V_MISC = 3         # darkness, radians per pixel
+V_SKY = 4          # ambient sky colour for reflections
+V_BODY = 5
+BODY_SLOTS = 5     # quad (layer uv x, y, w, h), pose (x, y, road z, yaw), paint (rgb, gloss), lights, extra
+MAX_DRAWN = 6      # bodies drawn per frame: our car, two leads, a stop sign, spare
+VEHICLE_SLOTS = V_BODY + BODY_SLOTS * MAX_DRAWN
+
+VEHICLE_SHADER = VERSION + f"""
 in vec2 fragTexCoord;
 in vec4 fragColor;
 out vec4 finalColor;
 
-uniform vec3 uvToRay[3];
-uniform vec3 camPos;
-uniform vec4 quad;          // this quad within the layer, in layer uv: x, y, w, h
-uniform vec4 pose;          // x, y, road z (calib), yaw
-uniform int model;
-uniform vec4 paint;         // rgb, a = gloss
-uniform vec4 lights;        // x: headlights, y: tail (0 off, ~0.4 tail lamps, 1 brake), z/w: left/right indicator;
-                            // for the stop sign x is its opacity
-uniform vec4 extra;         // x: reversing lights, y: darkness, z: radians per pixel, w: wheel turn (rad)
-uniform vec4 sky;           // ambient sky colour for reflections
+uniform vec4 vehicleData[{VEHICLE_SLOTS}];
+#define uvToRay mat3(vehicleData[{V_RAY}].xyz, vehicleData[{V_RAY + 1}].xyz, vehicleData[{V_RAY + 2}].xyz)
+#define camPos vec3(vehicleData[{V_RAY}].w, vehicleData[{V_RAY + 1}].w, vehicleData[{V_RAY + 2}].w)
+#define darkness vehicleData[{V_MISC}].x
+#define pixelAngle vehicleData[{V_MISC}].y
+#define sky vehicleData[{V_SKY}]
 
+// This quad's body, read from its slots at the start of main().
+vec4 quad;      // the quad within the layer, in layer uv: x, y, w, h
+vec4 pose;      // x, y, road z (calib), yaw
+vec4 paint;     // rgb, a = gloss
+vec4 lights;    // x: headlights, y: tail (0 off, ~0.4 tail lamps, 1 brake), z/w: left/right indicator;
+                // for the stop sign x is its opacity
+vec4 extra;     // x: reversing lights, y: model id, z: unused, w: wheel turn (rad)
+int model;
+
+void loadBody() {{
+  int slot = {V_BODY} + {BODY_SLOTS} * int(fragColor.r * 255.0 + 0.5);
+  quad = vehicleData[slot];
+  pose = vehicleData[slot + 1];
+  paint = vehicleData[slot + 2];
+  lights = vehicleData[slot + 3];
+  extra = vehicleData[slot + 4];
+  model = int(extra.y + 0.5);
+}}
+""" + """
 const vec3 GLASS = vec3(0.035, 0.045, 0.06);
 const vec3 TYRE = vec3(0.035, 0.035, 0.04);
 const vec3 RIM = vec3(0.55, 0.57, 0.6);
@@ -612,7 +660,7 @@ vec3 surface(vec3 p, vec3 n, vec3 rd, out float gloss) {
     if (face > 0.01 || !front) {
       return vec3(0.5, 0.52, 0.55);  // post, edges and the back of the plate
     }
-    float glow = 1.0 + 0.7 * extra.y;  // retroreflective: brighter at night, as if in our headlights
+    float glow = 1.0 + 0.7 * darkness;  // retroreflective: brighter at night, as if in our headlights
     vec2 g = f / r;
     if (face > -0.09 * r || (abs(g.y) < 0.22 && abs(g.x) < 0.7 && fract((g.x + 0.7) / 0.35) < 0.78)) {
       return vec3(0.93) * glow;  // white border and four blocks standing in for STOP
@@ -670,8 +718,9 @@ vec3 surface(vec3 p, vec3 n, vec3 rd, out float gloss) {
 }
 
 void main() {
+  loadBody();
   vec2 uv = quad.xy + fragTexCoord * quad.zw;
-  vec3 dir = normalize(mat3(uvToRay[0], uvToRay[1], uvToRay[2]) * vec3(uv, 1.0));
+  vec3 dir = normalize(uvToRay * vec3(uv, 1.0));
   // into the vehicle frame: x forward, y right, z up
   float c = cos(pose.w), s = sin(pose.w);
   vec3 o = camPos - pose.xyz;
@@ -681,7 +730,7 @@ void main() {
   vec4 b = bounds();
   vec3 center = vec3(0.0, 0.0, b.w);
   vec2 span = boxHit(ro - center, rd, b.xyz);
-  float pixel = extra.z;
+  float pixel = pixelAngle;
   vec4 result = vec4(0.0);
 
   if (span.y > max(span.x, 0.0)) {
@@ -710,7 +759,7 @@ void main() {
       vec3 n = normalAt(p, clamp(0.0015 * bestT, 0.002, 0.03));
       float gloss;
       vec3 albedo = surface(p, n, rd, gloss);
-      float dark = extra.y;
+      float dark = darkness;
       vec3 l = normalize(LIGHT_DIR);
       float diffuse = max(dot(n, l), 0.0);
       float ao = clamp(0.55 + p.z * 0.9, 0.0, 1.0);  // darker low down, near the road
@@ -746,7 +795,7 @@ void main() {
     }
     float miss = length(rel - rd * along);
     float radius = max(0.22, pixel * along * 4.0) * (i >= 6 ? 1.6 : (i >= 2 ? 1.5 : 1.0));
-    float g = exp(-miss * miss / (radius * radius)) * l.level * (0.55 + 0.45 * extra.y);
+    float g = exp(-miss * miss / (radius * radius)) * l.level * (0.55 + 0.45 * darkness);
     result.rgb = mix(result.rgb, l.color, g * (1.0 - result.a * 0.5));
     result.a = max(result.a, g);
   }

@@ -256,9 +256,8 @@ def test_large_camera_paint_is_unchanged(monkeypatch, request, lead_mode, metric
   state = replace(state, appearance=replace(state.appearance, lead_info_mode=lead_mode, lead_info_metric=metric))
   session.view.camera_layer(rl.Rectangle(0, 0, 2160, 1080), state)
   kwargs = camera.render_camera_model_layer.call_args.kwargs
-  assert set(kwargs) == {'road_style', 'camera_view', 'reverse_driver', 'lead_display', 'stop_sign'}
+  assert set(kwargs) == {'road_style', 'camera_view', 'reverse_driver', 'lead_display'}
   assert kwargs['road_style'] == state.customization['roadColors']['large']
-  assert kwargs['stop_sign'] == state.stop_sign_ahead  # StarPilot's confirmed STOP sighting, for the scene views
   assert kwargs['lead_display'] == ((True, int(lead_mode), metric) if lead_mode else None)
   assert kwargs['camera_view'] == state.appearance.camera_view
   assert kwargs['reverse_driver'] == state.reverse_driver_camera

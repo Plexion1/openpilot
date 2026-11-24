@@ -17,7 +17,7 @@ from openpilot.starpilot.ui.viz.options import SelectionStore, VehicleModel, Vie
 from openpilot.starpilot.ui.viz.rigs import RIGS, RigContext, stock_front_camera
 from openpilot.starpilot.ui.viz.scene import (LEAD_BRAKE_HOLD, RADAR_TO_CAMERA, SAMPLE_X, SAMPLES, STOP_MIN_AHEAD,
                                               STOP_SIGN_KEEP, Scene, SceneTracker, StopSign, StopSignTracker, stop_sign_sighting)
-from openpilot.starpilot.ui.viz.widgets import COMMA_ONLY_WIDGETS, SWITCHER_WIDGET, TURN_SIGNAL_WIDGET
+from openpilot.starpilot.ui.viz.widgets import SCENE_VIEW_WIDGETS, SWITCHER_WIDGET, TURN_SIGNAL_WIDGET
 
 RECT = (30.0, 30.0, 2100.0, 1020.0)
 NARROW = DEVICE_CAMERAS[("tizi", "ox03c10")].narrow_road
@@ -244,27 +244,50 @@ def test_settings_rows_save_to_the_scene_view_document(tmp_path):
   assert not settings.apply(bad, lambda: True, path)
 
 
-def test_widgets_are_registered_for_the_comma_screen_only():
+def test_widgets_are_registered_for_the_big_layout_and_starport():
   from openpilot.starpilot.ui.onroad_customization import (DEFAULT_WIDGET_ORDER, PROFILES, customization_metadata, default_document,
                                                            validate_document)
   large = PROFILES["large"]["widgets"]
-  assert {TURN_SIGNAL_WIDGET, SWITCHER_WIDGET} <= set(large) and not set(COMMA_ONLY_WIDGETS) & set(PROFILES["compact"]["widgets"])
+  assert {TURN_SIGNAL_WIDGET, SWITCHER_WIDGET} <= set(large) and not set(SCENE_VIEW_WIDGETS) & set(PROFILES["compact"]["widgets"])
   assert set(DEFAULT_WIDGET_ORDER["large"]) == set(large)
-  galaxy = customization_metadata(include_comma_only=True)["profiles"]["large"]
-  assert set(COMMA_ONLY_WIDGETS) <= set(galaxy["widgets"]) and set(galaxy["widgetOrder"]) == set(galaxy["widgets"])
-  starport = customization_metadata()["profiles"]["large"]  # StarPort builds its own layout from this
-  assert not set(COMMA_ONLY_WIDGETS) & set(starport["widgets"]) and set(starport["widgetOrder"]) == set(starport["widgets"])
+  galaxy = customization_metadata()["profiles"]["large"]
+  assert set(SCENE_VIEW_WIDGETS) <= set(galaxy["widgets"]) and set(galaxy["widgetOrder"]) == set(galaxy["widgets"])
 
   document = default_document()
   assert document["layouts"]["large"][SWITCHER_WIDGET]["enabled"]
   assert validate_document(document) == document
   older = copy.deepcopy(document)
-  for key in COMMA_ONLY_WIDGETS:
+  for key in SCENE_VIEW_WIDGETS:
     del older["layouts"]["large"][key]
-  older["widgetOrder"] = {"large": [key for key in DEFAULT_WIDGET_ORDER["large"] if key not in COMMA_ONLY_WIDGETS]}
+  older["widgetOrder"] = {"large": [key for key in DEFAULT_WIDGET_ORDER["large"] if key not in SCENE_VIEW_WIDGETS]}
   upgraded = validate_document(older)  # a layout saved before the widgets existed gains them
   assert upgraded["layouts"]["large"][TURN_SIGNAL_WIDGET] == large[TURN_SIGNAL_WIDGET]["default"]
-  assert set(COMMA_ONLY_WIDGETS) <= set(upgraded["widgetOrder"]["large"])
+  assert set(SCENE_VIEW_WIDGETS) <= set(upgraded["widgetOrder"]["large"])
+
+
+@pytest.mark.parametrize("viewport", [(1860, 1080), (1920, 1080), (2880, 1080)])
+def test_starport_layout_has_the_widgets_where_the_car_screen_draws_them(viewport):
+  from openpilot.starpilot.system.starport.projection_layout import (default_layout_for_viewport, layout_metadata_for_viewport,
+                                                                     projection_customization, validate_layout_for_viewport)
+  from openpilot.starpilot.ui.onroad_customization import default_document
+  from openpilot.starpilot.ui.viz.widgets import ANCHOR_SHIFT
+  metadata = layout_metadata_for_viewport(viewport)
+  assert set(SCENE_VIEW_WIDGETS) <= set(metadata["widgets"]) and set(SCENE_VIEW_WIDGETS) <= set(metadata["widgetOrder"])
+  # the car screen keeps the stock camera view: no VIEW / MODE buttons there, and they are not offered in its editor
+  assert metadata["widgets"][SWITCHER_WIDGET]["hidden"] and not metadata["widgets"][SWITCHER_WIDGET]["default"]["enabled"]
+  assert metadata["widgets"][TURN_SIGNAL_WIDGET]["default"]["enabled"]
+
+  document = default_layout_for_viewport(viewport)
+  older = copy.deepcopy(document)
+  for key in SCENE_VIEW_WIDGETS:
+    del older["widgets"][key]
+  assert validate_layout_for_viewport(older, viewport)["widgets"][TURN_SIGNAL_WIDGET] == document["widgets"][TURN_SIGNAL_WIDGET]
+
+  # the projected view adds the widget's anchor shift back, so it lands where the car screen's editor shows it
+  converted = projection_customization(document, default_document())["layouts"]["large"]
+  for key in SCENE_VIEW_WIDGETS:
+    drawn_x = converted[key]["x"] + ANCHOR_SHIFT[key] * (viewport[0] - 1860)
+    assert drawn_x == document["widgets"][key]["x"]
 
 
 def test_shaders_compile_as_glsl_es(tmp_path):

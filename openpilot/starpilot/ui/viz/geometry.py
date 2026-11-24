@@ -24,7 +24,7 @@ class VirtualCamera:
   ``intrinsics`` maps view coordinates to layer pixels and must have [0, 0, 1] as its last row, so the homogeneous
   w of a projected point is its depth along the camera axis.
   """
-  __slots__ = ("position", "rotation", "intrinsics", "_proj", "_offset")
+  __slots__ = ("position", "rotation", "intrinsics", "_proj", "_offset", "_rays")
 
   def __init__(self, position, rotation, intrinsics):
     self.position = np.asarray(position, dtype=np.float64).reshape(3)
@@ -32,6 +32,7 @@ class VirtualCamera:
     self.intrinsics = np.asarray(intrinsics, dtype=np.float64).reshape(3, 3)
     self._proj = self.intrinsics @ self.rotation
     self._offset = self._proj @ self.position
+    self._rays: tuple | None = None
 
   @property
   def focal(self) -> float:
@@ -65,23 +66,34 @@ class VirtualCamera:
 
   def uv_to_ray(self, rect: tuple[float, float, float, float]) -> np.ndarray:
     """3x3 matrix taking (u, v, 1) over ``rect`` (u, v in 0..1) to an unnormalised calib-frame ray direction."""
+    if self._rays is not None and self._rays[0] == rect:
+      return self._rays[1]
     x, y, w, h = rect
+    # intrinsics are upper triangular with a last row of (0, 0, 1): invert in closed form
+    (a, b, c), (_, d, e) = self.intrinsics[0], self.intrinsics[1]
+    pixel_to_view = np.array([[1.0 / a, -b / (a * d), (b * e - c * d) / (a * d)], [0.0, 1.0 / d, -e / d], [0.0, 0.0, 1.0]])
     screen_from_uv = np.array([[w, 0.0, x], [0.0, h, y], [0.0, 0.0, 1.0]])
-    return self.rotation.T @ np.linalg.inv(self.intrinsics) @ screen_from_uv
+    rays = self.rotation.T @ pixel_to_view @ screen_from_uv
+    self._rays = (rect, rays)
+    return rays
+
+
+def _cross(a, b) -> tuple[float, float, float]:
+  return a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]
 
 
 def look_at(eye, target, up=UP) -> np.ndarray:
-  """view_from_calib rotation for a camera at ``eye`` looking at ``target``."""
-  forward = np.asarray(target, dtype=np.float64) - np.asarray(eye, dtype=np.float64)
-  forward /= np.linalg.norm(forward)
-  right = np.cross(forward, up)
-  norm = np.linalg.norm(right)
+  """view_from_calib rotation for a camera at ``eye`` looking at ``target``. Plain float math: called every frame."""
+  fx, fy, fz = (float(t) - float(e) for t, e in zip(target, eye, strict=True))
+  norm = math.sqrt(fx * fx + fy * fy + fz * fz)
+  forward = (fx / norm, fy / norm, fz / norm)
+  right = _cross(forward, (float(up[0]), float(up[1]), float(up[2])))
+  norm = math.sqrt(right[0] ** 2 + right[1] ** 2 + right[2] ** 2)
   if norm < 1e-6:  # looking straight up or down: keep +x (car forward) as screen up
-    right = np.array([0.0, 1.0, 0.0])
+    right = (0.0, 1.0, 0.0)
   else:
-    right /= norm
-  down = np.cross(forward, right)
-  return np.stack((right, down, forward))
+    right = (right[0] / norm, right[1] / norm, right[2] / norm)
+  return np.array((right, _cross(forward, right), forward))
 
 
 def top_down_rotation() -> np.ndarray:

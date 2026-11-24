@@ -116,13 +116,14 @@ class Scene:
     return np.array([RADAR_TO_CAMERA - EGO_LENGTH / 2, 0.0, self.height])
 
 
-def _xy(line) -> np.ndarray:
-  """(N, 3) road points from a model XYZTData; the views draw a flat road, so z is left for the caller."""
-  x = np.array(list(line.x), dtype=np.float64)  # list() is the fast way out of a capnp list
-  y = np.array(list(line.y), dtype=np.float64)
-  points = np.zeros((min(len(x), len(y)), 3))
-  points[:, 0] = x[:len(points)]
-  points[:, 1] = y[:len(points)]
+def _xy(line, height: float) -> np.ndarray:
+  """(N, 3) road points from a model XYZTData on the flat road under the camera (z = height)."""
+  x, y = list(line.x), list(line.y)  # list() is the fast way out of a capnp list
+  n = min(len(x), len(y))
+  points = np.empty((n, 3))
+  points[:, 0] = x[:n]
+  points[:, 1] = y[:n]
+  points[:, 2] = height
   return points
 
 
@@ -245,11 +246,9 @@ class SceneTracker:
     model = sm["modelV2"]
     scene = Scene(valid=True, height=height)
 
-    scene.path = _xy(model.position)
-    scene.lane_lines = [_xy(line) for line in list(model.laneLines)[:4]]
-    scene.road_edges = [_xy(edge) for edge in list(model.roadEdges)[:2]]
-    for points in (scene.path, *scene.lane_lines, *scene.road_edges):
-      points[:, 2] = height  # flat road under the camera
+    scene.path = _xy(model.position, height)
+    scene.lane_lines = [_xy(line, height) for line in list(model.laneLines)[:4]]
+    scene.road_edges = [_xy(edge, height) for edge in list(model.roadEdges)[:2]]
     scene.lane_probs = np.array(list(model.laneLineProbs), dtype=np.float64)[:4]
     scene.road_edge_stds = np.array(list(model.roadEdgeStds), dtype=np.float64)[:2]
     scene.path_accel = np.array(list(model.acceleration.x), dtype=np.float64)
@@ -311,6 +310,19 @@ class SceneTracker:
                         heading=_heading(scene.path, x + 2.0), d_rel=d_rel, v_rel=float(data.vRel), v_lead=v_lead,
                         a_lead=a_lead, braking=braking, radar=bool(data.radar), primary=primary))
     return leads
+
+
+_noted_stop_sign: tuple[float, float, float, float] | None = None
+
+
+def note_stop_sign(sighting: tuple[float, float, float, float] | None) -> None:
+  """runtime_snapshot hook, once per frame: StarPilot's confirmed STOP sighting (stop_sign_sighting) or None."""
+  global _noted_stop_sign
+  _noted_stop_sign = sighting
+
+
+def noted_stop_sign() -> tuple[float, float, float, float] | None:
+  return _noted_stop_sign
 
 
 def stop_sign_sighting(confirmation, now_ns: int) -> tuple[float, float, float, float] | None:

@@ -51,7 +51,7 @@ from openpilot.starpilot.ui.unified_speed_presentation import (displayed_adjuste
                                                               positive, retaining_limit)
 from openpilot.starpilot.ui.onroad_stopped_timer import StoppedTimer
 from openpilot.starpilot.speed_limits.vision.stop_observation import StopConfirmation
-from openpilot.starpilot.ui.viz.scene import stop_sign_sighting
+from openpilot.starpilot.ui.viz.scene import note_stop_sign, stop_sign_sighting
 from openpilot.starpilot.ui.onroad_lane_alerts import lateral_lane_alert
 from openpilot.starpilot.ui.onroad_camera import ReverseDriverCamera
 from openpilot.starpilot.ui.navigation_state import navigation_display, official_navigation_display
@@ -737,7 +737,7 @@ class RuntimeSnapshotAdapter:
       sm, now_ns=now_ns, now_boot_ns=now_ns + pair[2], drive_id=drive_id, after_frame=after)
       if started and pair is not None else self._vision_stop.observe(None, now_ns=now_ns))
     # Scene views place a 3D sign from this same confirmation (no second detector pass).
-    stop_sign_ahead = stop_sign_sighting(self._vision_stop, now_ns) if stop_observed_ns else None
+    note_stop_sign(stop_sign_sighting(self._vision_stop, now_ns) if stop_observed_ns else None)
     weather_location = None
     if (started and getattr(ui, 'replay_clock', None) is None and
         any(layout.get('weather', {}).get('enabled', False) for layout in self._customization_value['layouts'].values())):
@@ -776,7 +776,6 @@ class RuntimeSnapshotAdapter:
       event_ns=int(sm.logMonoTime['starpilotCarState']) if drive_mode_source is not None else 0, now_ns=now_ns,
       native_alert=alert, traffic_active=bool(traffic is not None and traffic.state == 'active'))
     onroad = OnroadState(weather_location=weather_location, developer_metrics=developer_metrics, stop_sign_observed_ns=stop_observed_ns,
-                         stop_sign_ahead=stop_sign_ahead,
                          engaged=display_lat_active or display_long_active or longitudinal_overridden, camera_available=started,
                          speed_mps=raw_speed, cruise_kph=cruise, speed_limit=observation,
                          speed_display_offset_percent=self._customization_value.get("speedDisplayOffset", 0.),
