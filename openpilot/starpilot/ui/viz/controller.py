@@ -6,7 +6,9 @@ Hooks (a few lines in existing files):
   * OnroadView draws the scene view widgets (widgets.py) in its widget order: the VIEW / MODE switcher and the turn
     signal arrows
   * StarShellPage._handle_mouse_release -> handle_tap() before a tap toggles the sidebar
-  * AppearanceOwner lists the settings rows (settings.py) and applies their changes
+  * StarShellSession creates the shared instance at start (install) and adds the settings rows (settings.py) to the
+    Onroad HUD page; AppearanceOwner lists them for Galaxy and applies their changes
+  * RuntimeSnapshotAdapter hands over StarPilot's confirmed STOP sighting each frame (scene.note_stop_sign)
 
 GPU budget: the driving model shares the GPU with the UI, so the 3D scene is drawn at RENDER_SCALE resolution into
 an offscreen image during StarPilot's render-prepare step (gui_app.add_render_prepare, outside the frame, like the
@@ -14,7 +16,7 @@ torque bar and the map overlay) and the camera layer only stretches that image o
 widgets, text and borders are still drawn at full resolution on top. On the frame a scene view is switched on, the
 stock layer draws once while the first offscreen image is prepared; when only the angle or mode changes, the previous
 image shows for that one frame. Shaders take a while to compile on first use, so after a scene view has been used once
-they are compiled while the car is off, one per frame, and switching views onroad never stalls the UI.
+they are compiled while the car is off, one per second, and switching views onroad never stalls the UI.
 
 The time spent is reported through the UI's frame phases like the stock layer: camera polling as "camera", the
 scene and its drawing as "model", so slow frame diagnostics compare directly.
@@ -94,7 +96,7 @@ class SceneViews:
     self._prepared_serial = -1  # job serial the last prepare consumed
     self._prepare_seen = -1    # job serial at the last prepare call (prepare runs every frame when installed)
     self._ready: tuple | None = None  # (selection, rect) of the offscreen image drawn by this frame's prepare
-    self._lead_label: tuple | None = None  # (text, x, y) for that image: StarPilot's Lead Info above the lead
+    self._lead_label: tuple | None = None  # (text, above, below) for that image: StarPilot's Lead Info
     self._target = None
     self._guard_step = 0
     self._guard_next = 0.0     # monotonic time of the next allowed step
