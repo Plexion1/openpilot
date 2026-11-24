@@ -244,14 +244,14 @@ def test_settings_rows_save_to_the_scene_view_document(tmp_path):
   assert not settings.apply(bad, lambda: True, path)
 
 
-def test_widgets_are_registered_for_the_big_layout_and_starport():
+def test_widgets_are_registered_for_the_big_layout():
   from openpilot.starpilot.ui.onroad_customization import (DEFAULT_WIDGET_ORDER, PROFILES, customization_metadata, default_document,
                                                            validate_document)
   large = PROFILES["large"]["widgets"]
   assert {TURN_SIGNAL_WIDGET, SWITCHER_WIDGET} <= set(large) and not set(SCENE_VIEW_WIDGETS) & set(PROFILES["compact"]["widgets"])
   assert set(DEFAULT_WIDGET_ORDER["large"]) == set(large)
-  galaxy = customization_metadata()["profiles"]["large"]
-  assert set(SCENE_VIEW_WIDGETS) <= set(galaxy["widgets"]) and set(galaxy["widgetOrder"]) == set(galaxy["widgets"])
+  galaxy = customization_metadata(include_scene_views=True)["profiles"]["large"]  # the comma's layout editor
+  assert set(SCENE_VIEW_WIDGETS) <= set(galaxy["widgets"]) and galaxy["widgetOrder"] == list(DEFAULT_WIDGET_ORDER["large"])
 
   document = default_document()
   assert document["layouts"]["large"][SWITCHER_WIDGET]["enabled"]
@@ -266,28 +266,15 @@ def test_widgets_are_registered_for_the_big_layout_and_starport():
 
 
 @pytest.mark.parametrize("viewport", [(1860, 1080), (1920, 1080), (2880, 1080)])
-def test_starport_layout_has_the_widgets_where_the_car_screen_draws_them(viewport):
+def test_starport_layout_is_unchanged_until_it_learns_the_widgets(viewport):
+  """StarPort's layout module is outside what a Fast Update may replace, so for now its car-screen layout is built
+  without the scene view widgets and every layout saved on a car stays valid."""
   from openpilot.starpilot.system.starport.projection_layout import (default_layout_for_viewport, layout_metadata_for_viewport,
-                                                                     projection_customization, validate_layout_for_viewport)
-  from openpilot.starpilot.ui.onroad_customization import default_document
-  from openpilot.starpilot.ui.viz.widgets import ANCHOR_SHIFT
+                                                                     validate_layout_for_viewport)
   metadata = layout_metadata_for_viewport(viewport)
-  assert set(SCENE_VIEW_WIDGETS) <= set(metadata["widgets"]) and set(SCENE_VIEW_WIDGETS) <= set(metadata["widgetOrder"])
-  # the car screen keeps the stock camera view: no VIEW / MODE buttons there, and they are not offered in its editor
-  assert metadata["widgets"][SWITCHER_WIDGET]["hidden"] and not metadata["widgets"][SWITCHER_WIDGET]["default"]["enabled"]
-  assert metadata["widgets"][TURN_SIGNAL_WIDGET]["default"]["enabled"]
-
+  assert not set(SCENE_VIEW_WIDGETS) & set(metadata["widgets"]) and not set(SCENE_VIEW_WIDGETS) & set(metadata["widgetOrder"])
   document = default_layout_for_viewport(viewport)
-  older = copy.deepcopy(document)
-  for key in SCENE_VIEW_WIDGETS:
-    del older["widgets"][key]
-  assert validate_layout_for_viewport(older, viewport)["widgets"][TURN_SIGNAL_WIDGET] == document["widgets"][TURN_SIGNAL_WIDGET]
-
-  # the projected view adds the widget's anchor shift back, so it lands where the car screen's editor shows it
-  converted = projection_customization(document, default_document())["layouts"]["large"]
-  for key in SCENE_VIEW_WIDGETS:
-    drawn_x = converted[key]["x"] + ANCHOR_SHIFT[key] * (viewport[0] - 1860)
-    assert drawn_x == document["widgets"][key]["x"]
+  assert validate_layout_for_viewport(document, viewport) == document
 
 
 def test_shaders_compile_as_glsl_es(tmp_path):

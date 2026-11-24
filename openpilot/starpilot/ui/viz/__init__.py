@@ -34,10 +34,10 @@ How it hooks into StarPilot (a few lines in existing files)
     draws instead of the stock camera + model layer, so every StarPilot widget, alert and border still draws on top.
     The same layer is used by StarPilot's on-device replay, which therefore shows the selected view too.
   * Two onroad widgets in StarPilot's layout system (widgets.py), placed, hidden, recoloured and layered from Galaxy's
-    layout editor: the VIEW / MODE buttons (bottom right by default) and turn signal arrows beside the speed. StarPort's
-    car-screen layout has them too: the arrows draw there; the car screen keeps the stock camera view, so its VIEW /
-    MODE buttons stay hidden. Taps reach the buttons only when no StarPilot control claimed the touch (StarShellPage,
-    just before a tap would toggle the sidebar).
+    layout editor: the VIEW / MODE buttons (bottom right by default) and turn signal arrows beside the speed. They are
+    comma-screen widgets for now; StarPort's car-screen layout leaves them out until its layout module learns them
+    (widgets.py). Taps reach the buttons only when no StarPilot control claimed the touch (StarShellPage, just before
+    a tap would toggle the sidebar).
   * Settings rows (settings.py): angle, mode and the look of our car and the lead vehicles, on the device's Onroad HUD
     page, Galaxy's settings and the layout editor ("Scene views").
   * StarShellSession creates the shared instance at start (controller.install), so the shaders compile while parked.
@@ -45,8 +45,8 @@ How it hooks into StarPilot (a few lines in existing files)
       {"angle": "chase", "mode": "synthetic", "egoModel": "car", "egoColor": "Ocean Blue", "leadModel": "truck"}
     Params keys are compiled into the prebuilt branch, so a file is used instead; the UI picks changes up within two
     seconds.
-  * Nothing native changed, so nothing is rebuilt. StarPort's projection_layout.py is outside the UI roots that
-    StarPilot's Fast Update may replace, so an update carrying it installs as a full validated update.
+  * Nothing native changed, so nothing is rebuilt, and every changed file is inside the folders StarPilot's Fast Update
+    may replace.
 
 Cost
   The driving model runs on the same GPU, so the GPU budget is what matters most.

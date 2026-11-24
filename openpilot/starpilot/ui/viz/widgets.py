@@ -7,9 +7,10 @@ layer them like any other widget, and drawn by OnroadView (onroad.py) in the cho
 * turn_signals         blinking green arrows either side of the current speed while a turn signal is on, using
                        StarPilot's own turn signal art; its blind spot icon instead while that side is occupied.
 
-StarPort (the Android Auto car screen) has both in its own layout as well (projection_layout.PROJECTION_WIDGETS): the
-turn signal arrows draw there too; the car screen keeps the stock camera view, so its VIEW / MODE buttons are hidden
-from that editor and never drawn there.
+For now they are comma-screen widgets: StarPort (the Android Auto car screen) builds its layout without them, because
+its layout module (starpilot/system/starport, outside the folders a Fast Update may replace) has to learn them first.
+That integration is ready in history (adding them to projection_layout.PROJECTION_WIDGETS with car-screen defaults,
+the arrows drawn on the car screen and the VIEW / MODE buttons hidden there) and ships later as one full update.
 
 This module is imported by onroad_customization, which Galaxy loads without a display, so it must not import raylib
 at module level.

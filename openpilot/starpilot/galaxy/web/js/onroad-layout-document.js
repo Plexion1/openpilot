@@ -241,8 +241,7 @@ export function validSnapshot(data) {
         zone.x + zone.width > bounds.x + bounds.width || zone.y + zone.height > bounds.y + bounds.height) return false
     }
     for (const widget of Object.values(profile.widgets)) {
-      // Unsupported widgets: rear fog without the hardware, scene view buttons on StarPort's car screen
-      if (widget.hidden != null && (!["rear_fog", "scene_view_switcher"].includes(widget.kind) || typeof widget.hidden !== "boolean")) return false
+      if (widget.hidden != null && (widget.kind !== "rear_fog" || typeof widget.hidden !== "boolean")) return false
       for (const area of [widget.confirmation, widget.confirmationObstacle]) {
         if (area != null && (!keysEqual(area, ["x", "y", "width", "height"]) ||
           !Number.isFinite(area.x) || Math.abs(area.x) > profile.width ||

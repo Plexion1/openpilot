@@ -76,7 +76,7 @@ class OnroadLayoutOwner:
       "defaults": {row.key: row.default_value for row in rows if row.default_value is not None},
     }
     from openpilot.starpilot.car.ford.rear_fog import main_bus
-    metadata = customization_metadata()
+    metadata = customization_metadata(include_scene_views=True)
     for profile in metadata["profiles"].values():
       profile["widgets"]["rear_fog"]["hidden"] = main_bus(self.vehicle_params()) is None
     return {"document": document, "defaults": default_document(), "revision": _revision(raw, rows, rotation),

@@ -370,8 +370,14 @@ def widget_bounds(profile, widget):
   return PROFILES[profile]["widgets"][widget].get("bounds", PROFILES[profile]["bounds"])
 
 
-def customization_metadata():
+def customization_metadata(include_scene_views: bool = False):
+  """Editor metadata. StarPort builds its car-screen layout from the default, which leaves the scene view widgets out
+  until StarPort's own layout module accepts them (that change ships later as a full update, not a Fast Update); the
+  comma's editor asks for them."""
   profiles = copy.deepcopy(PROFILES)
+  if not include_scene_views:
+    for key in SCENE_VIEW_WIDGETS:
+      profiles["large"]["widgets"].pop(key, None)
   profiles["large"]["widgets"]["driver_monitor"]["defaultAnchor"] = "driver_side"
   profiles["large"]["widgets"]["following_distance"]["defaultAnchor"] = "driver_side"
   # The editor grows the cruise box by these while speed-limit sources are shown.
@@ -396,7 +402,7 @@ def customization_metadata():
       profile["widgets"][key]["resizable"] = {"min": minimum, "default": default, "max": maximum}
       profile["widgets"][key]["default"]["size"] = default
   for profile, data in profiles.items():
-    data["widgetOrder"] = list(DEFAULT_WIDGET_ORDER[profile])
+    data["widgetOrder"] = [key for key in DEFAULT_WIDGET_ORDER[profile] if key in data["widgets"]]
     data["runtimePreviewWidgets"] = list(RUNTIME_PREVIEW_WIDGETS[profile])
   return {"profiles": profiles, "roadColorFields": [
     {"id": key, "label": label, "default": ROAD_COLORS[key]}
