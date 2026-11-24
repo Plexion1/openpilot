@@ -1,9 +1,14 @@
-"""The driver's choice of camera angle and visualization mode, and where it is saved.
+"""The driver's scene view choices and where they are saved.
 
-Params keys are compiled into libparams on prebuilt branches, so the selection lives in a small JSON document in
-StarPilot's storage root instead (``/data/starpilot/scene_views.json`` on the device). Anything can write the same file
-(Galaxy, SSH, a future settings page); the UI re-reads it when its modification time changes. Unknown keys are kept,
-so newer builds can add options without breaking older ones.
+Params keys are compiled into libparams on prebuilt branches, so the choices live in a small JSON document in
+StarPilot's storage root instead (``/data/starpilot/scene_views.json`` on the device), e.g.
+
+  {"angle": "chase", "mode": "synthetic", "egoModel": "car", "egoColor": "Ocean Blue", "leadModel": "truck",
+   "leadColor": "Silver"}
+
+The on-screen switcher, the settings rows (settings.py, shown on the device and in Galaxy) and anything else may
+write it; the UI re-reads it when its modification time changes. Unknown keys are kept, so newer builds can add
+options without breaking older ones, and unknown values fall back to the defaults.
 """
 from __future__ import annotations
 
@@ -29,11 +34,32 @@ class VizMode(StrEnum):
   HYBRID = "hybrid"
 
 
+class VehicleModel(StrEnum):
+  CAR = "car"
+  TRUCK = "truck"
+  SPHERE = "sphere"
+
+
 # Cycling order and on-screen names. Register new angles/modes here and in rigs.RIGS / renderer.MODE_STYLES.
 ANGLE_LABELS = {ViewAngle.FRONT: "Front", ViewAngle.CHASE: "Chase", ViewAngle.TOP: "Top"}
 MODE_LABELS = {VizMode.CAMERA: "Camera", VizMode.SYNTHETIC: "Synthetic", VizMode.HYBRID: "Hybrid"}
+VEHICLE_LABELS = {VehicleModel.CAR: "Car", VehicleModel.TRUCK: "Truck", VehicleModel.SPHERE: "Sphere"}
 ANGLE_ORDER = tuple(ANGLE_LABELS)
 MODE_ORDER = tuple(MODE_LABELS)
+
+# Paint colours offered for the vehicles (sRGB; the vehicle shader lights them).
+COLORS = {
+  "Pearl White": (226, 229, 232),
+  "Silver": (160, 166, 174),
+  "Graphite": (74, 78, 86),
+  "Midnight": (28, 30, 36),
+  "Racing Red": (190, 30, 36),
+  "Sunset Orange": (228, 108, 30),
+  "Solar Yellow": (232, 190, 40),
+  "Forest Green": (32, 120, 70),
+  "Ocean Blue": (34, 96, 204),
+  "Galaxy Purple": (124, 80, 212),
+}
 
 
 def _next(order, current):
@@ -44,7 +70,6 @@ def _next(order, current):
 class VizSelection:
   angle: ViewAngle = ViewAngle.FRONT
   mode: VizMode = VizMode.CAMERA
-  controls: bool = True  # show the on-screen VIEW / MODE switcher
 
   @property
   def stock(self) -> bool:
@@ -58,13 +83,46 @@ class VizSelection:
     return replace(self, mode=_next(MODE_ORDER, self.mode))
 
 
+@dataclass(frozen=True)
+class VehicleLook:
+  model: VehicleModel
+  color: str
+
+  @property
+  def rgb(self) -> tuple[int, int, int]:
+    return COLORS.get(self.color, COLORS["Silver"])
+
+
+@dataclass(frozen=True)
+class SceneStyle:
+  ego: VehicleLook = VehicleLook(VehicleModel.CAR, "Ocean Blue")
+  lead: VehicleLook = VehicleLook(VehicleModel.CAR, "Silver")
+
+
 def default_path() -> Path:
   from openpilot.starpilot.storage import starpilot_storage_root
   return starpilot_storage_root() / FILE_NAME
 
 
+def parse_selection(document: dict) -> VizSelection:
+  return VizSelection(
+    angle=ViewAngle(document["angle"]) if document.get("angle") in ViewAngle._value2member_map_ else ViewAngle.FRONT,
+    mode=VizMode(document["mode"]) if document.get("mode") in VizMode._value2member_map_ else VizMode.CAMERA,
+  )
+
+
+def parse_style(document: dict) -> SceneStyle:
+  default = SceneStyle()
+
+  def look(prefix: str, fallback: VehicleLook) -> VehicleLook:
+    model, color = document.get(prefix + "Model"), document.get(prefix + "Color")
+    return VehicleLook(VehicleModel(model) if model in VehicleModel._value2member_map_ else fallback.model,
+                       color if color in COLORS else fallback.color)
+  return SceneStyle(ego=look("ego", default.ego), lead=look("lead", default.lead))
+
+
 class SelectionStore:
-  """Cached read of the selection file; writes are atomic and only happen on a change."""
+  """Cached read of the scene view document; writes are atomic and only happen on a change."""
 
   def __init__(self, path: Path | None = None, poll_interval: float = 2.0):
     self._path = path
@@ -73,6 +131,7 @@ class SelectionStore:
     self._mtime: float | None = None
     self._document: dict = {}
     self._selection = VizSelection()
+    self._style = SceneStyle()
 
   @property
   def path(self) -> Path:
@@ -81,17 +140,21 @@ class SelectionStore:
     return self._path
 
   def get(self) -> VizSelection:
-    now = time.monotonic()
-    if now >= self._next_poll:
-      self._next_poll = now + self._poll_interval
-      self._refresh()
+    self._poll()
     return self._selection
 
+  def style(self) -> SceneStyle:
+    self._poll()
+    return self._style
+
   def set(self, selection: VizSelection) -> None:
-    if selection == self._selection:
-      return
-    self._selection = selection
-    self._document.update(angle=selection.angle.value, mode=selection.mode.value, controls=selection.controls)
+    if selection != self._selection:
+      self.update(angle=selection.angle.value, mode=selection.mode.value)
+
+  def update(self, **fields) -> bool:
+    """Merge fields into the document and save it. False when it could not be written (it still applies until restart)."""
+    self._document.update(fields)
+    self._selection, self._style = parse_selection(self._document), parse_style(self._document)
     try:
       self.path.parent.mkdir(parents=True, exist_ok=True)
       tmp = self.path.with_name(self.path.name + ".tmp")
@@ -99,7 +162,14 @@ class SelectionStore:
       os.replace(tmp, self.path)
       self._mtime = self.path.stat().st_mtime
     except OSError:
-      pass  # the choice still applies for this session
+      return False
+    return True
+
+  def _poll(self) -> None:
+    now = time.monotonic()
+    if now >= self._next_poll:
+      self._next_poll = now + self._poll_interval
+      self._refresh()
 
   def _refresh(self) -> None:
     try:
@@ -116,8 +186,4 @@ class SelectionStore:
     if not isinstance(document, dict):
       return
     self._document = document
-    self._selection = VizSelection(
-      angle=ViewAngle(document["angle"]) if document.get("angle") in ViewAngle._value2member_map_ else ViewAngle.FRONT,
-      mode=VizMode(document["mode"]) if document.get("mode") in VizMode._value2member_map_ else VizMode.CAMERA,
-      controls=document.get("controls", True) is not False,
-    )
+    self._selection, self._style = parse_selection(document), parse_style(document)

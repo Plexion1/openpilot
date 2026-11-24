@@ -14,6 +14,7 @@ from openpilot.starpilot.ui.onroad_customization import (
 from openpilot.starpilot.ui.presentation import Profile
 from openpilot.starpilot.ui.wheel_rotation import read_rotation, take_rotation, write_rotation
 from openpilot.starpilot.galaxy.setting_descriptions import description
+from openpilot.starpilot.ui.viz.settings import LABELS as SCENE_VIEW_LABELS
 
 # Display preferences edited with the layout but saved in their own params. Groups order the editor.
 DISPLAY_GROUPS = {
@@ -22,6 +23,7 @@ DISPLAY_GROUPS = {
   "HideLeadMarker": "Lead car", "LeadInfo": "Lead car",
   "CameraView": "Camera (Small layout)", "DriverCamera": "Camera (Small layout)",
   "HidePersonalityAlerts": "Alerts and borders", "SignalMetrics": "Alerts and borders", "BlindSpotMetrics": "Alerts and borders",
+  **dict.fromkeys(SCENE_VIEW_LABELS, "Scene views (Big layout)"),
 }
 
 
@@ -74,7 +76,7 @@ class OnroadLayoutOwner:
       "defaults": {row.key: row.default_value for row in rows if row.default_value is not None},
     }
     from openpilot.starpilot.car.ford.rear_fog import main_bus
-    metadata = customization_metadata()
+    metadata = customization_metadata(include_comma_only=True)
     for profile in metadata["profiles"].values():
       profile["widgets"]["rear_fog"]["hidden"] = main_bus(self.vehicle_params()) is None
     return {"document": document, "defaults": default_document(), "revision": _revision(raw, rows, rotation),

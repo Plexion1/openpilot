@@ -40,6 +40,7 @@ from openpilot.starpilot.ui.onroad_torque import TorqueBarWidget
 from openpilot.starpilot.ui.onroad_navigation import NavigationCard
 from openpilot.starpilot.ui.onroad_navigation_favorites import NavigationFavorites
 from openpilot.starpilot.ui.presentation import BitmapFonts, FontRole, Profile
+from openpilot.starpilot.ui.viz import widgets as scene_widgets
 from openpilot.starpilot.conditional_mode.policy import ModeChoice
 
 
@@ -336,6 +337,8 @@ class OnroadView:
           submit("torque_bar", lambda: self.torque_bar.render(content, state, width if self.projection_viewport else 2160))
         if state.stopped_duration_s is not None:
           submit(STOPPED_TIMER_WIDGET, lambda: self._stopped_timer(state, state.stopped_duration_s))
+      submit(scene_widgets.TURN_SIGNAL_WIDGET, lambda: scene_widgets.render_turn_signals(state, width - 1860))
+      submit(scene_widgets.SWITCHER_WIDGET, lambda: scene_widgets.render_switcher(state, width - 1860, self.fonts))
     else:
       submit("nav_card", lambda: self.navigation.render(state))
       if state.alert.size == AlertSize.NONE and not driver_camera:
@@ -438,6 +441,8 @@ class OnroadView:
         self._driving_mode(state, right_shift / 2)
         self._clock(state, right_shift / 2)
         self._weather(state, right_shift / 2)
+        scene_widgets.render_turn_signals(state, right_shift)
+        scene_widgets.render_switcher(state, right_shift, self.fonts)
         if exit_layer := getattr(self, "projection_exit_layer", None):
           exit_layer(state)
       if not ordered and manual_slc_confirmation(self.fonts.profile, state):

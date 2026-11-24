@@ -264,11 +264,16 @@ PROFILES['large']['widgets'][CEM_GAUGE_WIDGET] = _widget('CEM road gauge', CEM_G
                                                          56, 536)
 for _profile, _geometry in {"large": (112, 70, 165, 294), "compact": (45, 28, 220, 12)}.items():
   PROFILES[_profile]["widgets"]["rear_fog"] = _widget("Rear fog indicator", "rear_fog", *_geometry)
+# Scene view widgets (turn signal arrows, VIEW / MODE buttons): comma screen only, StarPort's layout leaves them out.
+from openpilot.starpilot.ui.viz.widgets import (ANCHOR_SHIFT as SCENE_ANCHOR_SHIFT, COLORS as SCENE_WIDGET_COLORS,  # noqa: E402
+                                                COMMA_ONLY_WIDGETS, widget_specs as scene_widget_specs)
+PROFILES["large"]["widgets"].update(scene_widget_specs())
 
 ROAD_BASE_WIDTH = 1860
 SIDEBAR_EXTRA = 300
 ANCHOR_SHIFT = {"steering_wheel": 1.0, "pip_right": 1.0, NAV_CARD_WIDGET: 1.0, NAV_MAP_WIDGET: 1.0,
-                "current_speed": .5, "torque_bar": .5, MODE_WIDGET: .5, CLOCK_WIDGET: .5, WEATHER_WIDGET: .5}
+                "current_speed": .5, "torque_bar": .5, MODE_WIDGET: .5, CLOCK_WIDGET: .5, WEATHER_WIDGET: .5,
+                **SCENE_ANCHOR_SHIFT}
 for _key, _widget_data in PROFILES["large"]["widgets"].items():
   if _key in ANCHOR_SHIFT:
     _widget_data["anchorShift"] = ANCHOR_SHIFT[_key]
@@ -277,7 +282,7 @@ for _key, _widget_data in PROFILES["large"]["widgets"].items():
   _widget_data["expandable"] = True
 # Older documents retain every saved placement and gain this independent widget.
 OPTIONAL_WIDGETS = frozenset({WEATHER_WIDGET, MODE_WIDGET, CLOCK_WIDGET, STOPPED_TIMER_WIDGET, CEM_GAUGE_WIDGET,
-                              NAV_CARD_WIDGET, NAV_MAP_WIDGET, JETLINK_WIDGET, SIGNAL_WIDGET, "rear_fog"})
+                              NAV_CARD_WIDGET, NAV_MAP_WIDGET, JETLINK_WIDGET, SIGNAL_WIDGET, "rear_fog", *COMMA_ONLY_WIDGETS})
 
 # The torque arc grows when the developer sidebar closes; protect both road widths.
 _torque = PROFILES['large']['widgets']['torque_bar']
@@ -309,6 +314,7 @@ WIDGET_COLORS = {
     "steering_wheel": {"cardFill": None, "cardBorder": "#00000000"},
     "driver_monitor": _FRAME_COLORS,
     "following_distance": _FRAME_COLORS,
+    **SCENE_WIDGET_COLORS,
   },
   "compact": {
     MODE_WIDGET: {"text": "#FFFFFFFF"},
@@ -341,7 +347,8 @@ def _fit_legacy_signal(placement: dict, bounds: Bounds) -> None:
 DEFAULT_WIDGET_ORDER = {
   "large": (NAV_MAP_WIDGET, "cruise_limits", CEM_GAUGE_WIDGET, "current_speed",
             "steering_wheel", "torque_bar", "following_distance", "driver_monitor", MODE_WIDGET, CLOCK_WIDGET, WEATHER_WIDGET,
-            STOPPED_TIMER_WIDGET, NAV_CARD_WIDGET, JETLINK_WIDGET, SIGNAL_WIDGET, "rear_fog", "pip_left", "pip_right"),
+            STOPPED_TIMER_WIDGET, NAV_CARD_WIDGET, JETLINK_WIDGET, SIGNAL_WIDGET, "rear_fog", *COMMA_ONLY_WIDGETS,
+            "pip_left", "pip_right"),
   "compact": ("speed_limit", "max_speed", "steering_wheel", "torque_bar",
               "driver_monitor", *RAIL_WIDGETS, MODE_WIDGET, CLOCK_WIDGET, WEATHER_WIDGET,
               STOPPED_TIMER_WIDGET, NAV_CARD_WIDGET, "rear_fog", "pip_left", "pip_right"),
@@ -363,8 +370,13 @@ def widget_bounds(profile, widget):
   return PROFILES[profile]["widgets"][widget].get("bounds", PROFILES[profile]["bounds"])
 
 
-def customization_metadata():
+def customization_metadata(include_comma_only: bool = False):
+  """Editor metadata. StarPort's layout is built from this without ``include_comma_only``, so its saved documents
+  never gain widgets that only the comma screen draws."""
   profiles = copy.deepcopy(PROFILES)
+  if not include_comma_only:
+    for key in COMMA_ONLY_WIDGETS:
+      profiles["large"]["widgets"].pop(key, None)
   profiles["large"]["widgets"]["driver_monitor"]["defaultAnchor"] = "driver_side"
   profiles["large"]["widgets"]["following_distance"]["defaultAnchor"] = "driver_side"
   # The editor grows the cruise box by these while speed-limit sources are shown.
@@ -389,7 +401,7 @@ def customization_metadata():
       profile["widgets"][key]["resizable"] = {"min": minimum, "default": default, "max": maximum}
       profile["widgets"][key]["default"]["size"] = default
   for profile, data in profiles.items():
-    data["widgetOrder"] = list(DEFAULT_WIDGET_ORDER[profile])
+    data["widgetOrder"] = [key for key in DEFAULT_WIDGET_ORDER[profile] if key in data["widgets"]]
     data["runtimePreviewWidgets"] = list(RUNTIME_PREVIEW_WIDGETS[profile])
   return {"profiles": profiles, "roadColorFields": [
     {"id": key, "label": label, "default": ROAD_COLORS[key]}

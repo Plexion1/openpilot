@@ -12,6 +12,7 @@ from openpilot.starpilot.ui.appearance_preferences import (CAMERA_LABELS, DEFAUL
                                                           RETIRED_DISPLAY_KEYS, read_camera_view, read_lead_info, read_visibility)
 from openpilot.starpilot.ui.feature_settings_state import FeatureRow, FeatureSettingsRequest, FeatureSettingsState
 from openpilot.starpilot.ui.presentation import Profile
+from openpilot.starpilot.ui.viz import settings as scene_view_settings
 
 
 # Widget visibility, the stopped timer and Rainbow Road live in the onroad customization document.
@@ -25,6 +26,7 @@ LABELS = {
   "LeadInfo": "Lead Info",
   "SignalMetrics": "C4 amber signal border",
   "BlindSpotMetrics": "C4 red blind-spot border",
+  **scene_view_settings.LABELS,
 }
 
 
@@ -96,6 +98,8 @@ class AppearanceOwner:
                           source=raw, choices=("Off", "On"), available=parked and document is not None, default_value="On",
                           reason="On the comma screen only; StarPort has its own layout" if document is not None else
                                  "Repair the saved layout in Colors & Layout"),)
+    if profile == Profile.LARGE or include_large:
+      rows += scene_view_settings.rows(parked)  # scene views draw on the Big layout only
     if profile == Profile.LARGE:
       rows += (FeatureRow('ReduceMotion', 'Reduce Quick Select motion',
                           ('On' if document.get('reduceMotion') else 'Off') if document is not None else 'Unavailable', source=raw,
@@ -119,6 +123,8 @@ class AppearanceOwner:
                                 (row,), self.parked())
 
   def apply(self, request: FeatureSettingsRequest) -> bool:
+    if request.key.startswith(scene_view_settings.PREFIX):
+      return scene_view_settings.apply(request, self.parked)
     if request.key == "SpeedDisplayOffset":
       raw, document = self._motion_source()
       if document is None or request.expected != raw or type(request.value) is not str:

@@ -1,12 +1,13 @@
-"""Draws one scene view: ground pass, road geometry from the model, and spheres for the car and leads.
+"""Draws one scene view: the ground pass (road, markings, path and everything else on the road) and the vehicles.
 
-Per frame the CPU work is a handful of small numpy projections and about a dozen batched draw calls; the road, sky and
-camera reprojection run in a single full-layer shader pass. GL resources are created on first use.
+CPU work per frame is a few dozen small uniform uploads and one draw call for the ground plus one per vehicle. The
+road geometry arrays are uploaded only when a new model frame arrives, and constants only once per shader.
 
 To add a visualization mode: add a VizMode in options.py and a ModeStyle here. To add an angle: see rigs.py.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -16,29 +17,28 @@ from openpilot.common.swaglog import cloudlog
 from openpilot.starpilot.ui.raylib import rl
 from openpilot.starpilot.ui.viz import shaders
 from openpilot.starpilot.ui.viz.camera_feed import CameraGeometry, FrameTextures
-from openpilot.starpilot.ui.viz.geometry import VirtualCamera, clip_line, ground_disc, offset_line, project_ribbon
-from openpilot.starpilot.ui.viz.options import VizMode
+from openpilot.starpilot.ui.viz.geometry import VirtualCamera
+from openpilot.starpilot.ui.viz.options import SceneStyle, VehicleLook, VehicleModel, VizMode
 from openpilot.starpilot.ui.viz.rigs import Rig
-from openpilot.starpilot.ui.viz.scene import EGO_RADIUS, LEAD_RADIUS, RADAR_TO_CAMERA, Scene
-from openpilot.system.ui.lib.shader_polygon import Gradient, draw_polygon
+from openpilot.starpilot.ui.viz.scene import EGO_LENGTH, RADAR_TO_CAMERA, SAMPLE_MAX_X, SAMPLE_X, Scene
 
 UNIFORM_FLOAT = rl.ShaderUniformDataType.SHADER_UNIFORM_FLOAT
 UNIFORM_INT = rl.ShaderUniformDataType.SHADER_UNIFORM_INT
 UNIFORM_VEC3 = rl.ShaderUniformDataType.SHADER_UNIFORM_VEC3
 UNIFORM_VEC4 = rl.ShaderUniformDataType.SHADER_UNIFORM_VEC4
 
-MAX_LINE_DISTANCE = 120.0  # m, like the stock renderer's draw distance cap with some extra for the top view
-PATH_HALF_WIDTH = 0.9      # m, stock path width
-MIN_PATH_LENGTH = 1.5      # m; when stopped the predicted path is a few centimetres long and would draw as a sliver
+# Stock path colours (model_renderer.THROTTLE_COLORS / NO_THROTTLE_COLORS), near and far.
+THROTTLE = ((13, 248, 122, 102), (114, 255, 92, 0))
+NO_THROTTLE = ((242, 242, 242, 102), (242, 242, 242, 0))
+STATUS_GLOW = {"engaged": (0.12, 0.86, 0.45, 0.38), "override": (0.75, 0.78, 0.8, 0.22)}
 
-# Stock path colours (model_renderer.THROTTLE_COLORS / NO_THROTTLE_COLORS), bottom to top of the layer.
-THROTTLE = ((13, 248, 122, 102), (114, 255, 92, 89), (114, 255, 92, 0))
-NO_THROTTLE = ((242, 242, 242, 102), (242, 242, 242, 89), (242, 242, 242, 0))
-
-EGO_COLORS = {"engaged": (40, 205, 115), "override": (160, 168, 164), "disengaged": (70, 145, 240)}
-LEAD_COLOR = (232, 62, 52)
-SECOND_LEAD_COLOR = (235, 150, 55)
-LIGHT_DIR = np.array([-0.45, 0.62, 0.64], dtype=np.float32)  # from upper left, slightly towards the viewer
+# Vehicle model id in the shader, footprint (length, width) and the radius of its wheels.
+VEHICLE_MODELS = {VehicleModel.CAR: (0, 4.6, 1.84, 0.34), VehicleModel.TRUCK: (1, 5.6, 2.0, 0.4),
+                  VehicleModel.SPHERE: (2, 1.8, 1.8, 0.9)}
+VEHICLE_HEIGHT = {VehicleModel.CAR: 1.48, VehicleModel.TRUCK: 1.95, VehicleModel.SPHERE: 1.82}
+GLOSS = {VehicleModel.CAR: 0.85, VehicleModel.TRUCK: 0.7, VehicleModel.SPHERE: 0.9}
+BLINK_PERIOD = 1.0   # s, matches StarPilot's turn signal border (500 ms on, 500 ms off)
+ODOMETER_WRAP = 2400.0  # m; a multiple of the dash (12 m) and grid (4 m) periods so the wrap is invisible
 
 
 @dataclass(frozen=True)
@@ -46,78 +46,58 @@ class Palette:
   sky_top: tuple = (16, 22, 33, 255)
   sky_horizon: tuple = (62, 76, 96, 255)
   ground: tuple = (30, 33, 39, 255)
-  grid: tuple = (110, 122, 140, 90)   # alpha is grid strength
-  grid_size: float = 4.0              # m
+  grid: tuple = (110, 122, 140, 70)   # alpha is grid strength
   fog_distance: float = 140.0         # m
 
 
 @dataclass(frozen=True)
 class ModeStyle:
   shader_mode: int                 # 0 synthetic ground, 1 camera colour, 2 hybrid markings
-  road_surface: tuple              # ground between the model's road edges where no camera image is shown; alpha 0 = none
-  lane_rgb: tuple
+  road_surface: tuple              # ground between the road edges where no camera image is shown; alpha 0 = none
   lane_alpha: float                # scales the model's lane line probability
   edge_alpha: float
   path_alpha: float
   lane_width_scale: float = 1.0
+  lane_rgb: tuple | None = None    # None: StarPilot's lane colours (white unless customised)
 
 
 MODE_STYLES = {
-  VizMode.CAMERA: ModeStyle(1, (46, 50, 58, 200), (255, 255, 255), 0.85, 0.8, 1.0),
-  VizMode.SYNTHETIC: ModeStyle(0, (54, 59, 68, 255), (245, 245, 245), 1.0, 0.9, 1.5),
+  VizMode.CAMERA: ModeStyle(1, (46, 50, 58, 200), 0.85, 0.8, 1.0),
+  VizMode.SYNTHETIC: ModeStyle(0, (52, 57, 66, 255), 1.0, 0.9, 1.0, lane_width_scale=1.2),
   # hybrid: thin blue model lines so the paint found in the camera stays visible underneath
-  VizMode.HYBRID: ModeStyle(2, (54, 59, 68, 255), (120, 180, 255), 0.55, 0.6, 1.3, lane_width_scale=0.45),
+  VizMode.HYBRID: ModeStyle(2, (52, 57, 66, 255), 0.55, 0.6, 1.0, lane_width_scale=0.45, lane_rgb=(120, 180, 255)),
 }
 
-# How much of the real camera the reprojection trusts (per stream). The wide lens is treated as a pinhole like the
-# rest of openpilot, which bends towards its edges, so only the central part is used. Rows near the bottom are usually
-# the hood or dashboard.
-CAMERA_LIMITS = {
-  # min road distance (m), fade start (m), fade end (m), lowest usable v, widest usable ray (tan^2)
-  False: (4.0, 70.0, 140.0, 1.0, 0.0),
-  True: (2.5, 45.0, 90.0, 0.80, 1.4 ** 2),
-}
-
-
-def _color(rgba, alpha_scale: float = 1.0) -> rl.Color:
-  r, g, b, a = rgba
-  return rl.Color(int(r), int(g), int(b), int(np.clip(a * alpha_scale, 0, 255)))
+# How much of the real camera the reprojection trusts: min road distance (m), fade start/end (m), lowest usable v.
+CAMERA_LIMITS = {False: (4.0, 70.0, 140.0, 1.0), True: (2.5, 45.0, 90.0, 0.80)}
 
 
 def _vec4(rgba) -> np.ndarray:
   return np.array(rgba, dtype=np.float32) / 255.0
 
 
-def _hls_to_rgb(h: np.ndarray, l: np.ndarray, s: np.ndarray) -> np.ndarray:
-  """Vectorised colorsys.hls_to_rgb, (N,) arrays -> (N, 3)."""
-  q = np.where(l <= 0.5, l * (1.0 + s), l + s - l * s)
-  p = 2.0 * l - q
-
-  def channel(t):
-    t = t % 1.0
-    return np.select([t < 1 / 6, t < 0.5, t < 2 / 3], [p + (q - p) * t * 6.0, q, p + (q - p) * (2 / 3 - t) * 6.0], p)
-  return np.column_stack((channel(h + 1 / 3), channel(h), channel(h - 1 / 3)))
+def _hex(color: str | None) -> tuple[int, int, int, int] | None:
+  if not isinstance(color, str) or len(color) != 9:
+    return None
+  try:
+    return tuple(int(color[i:i + 2], 16) for i in (1, 3, 5, 7))
+  except ValueError:
+    return None
 
 
-@dataclass
-class _Ribbons:
-  lines: list            # (left, right, color) for road edges and lane lines
-  path: np.ndarray       # driven path, clipped at the lead
-  path_edges: tuple | None
+def _f32(*values) -> np.ndarray:
+  return np.array(values, dtype=np.float32)
 
 
-class _GroundShader:
-  """Uniform locations and upload buffers for one ground shader program."""
-  COMMON = ("uvToRay", "camPos", "groundZ", "odometer", "gridSize", "fogDistance", "skyTop", "skyHorizon", "groundColor", "gridColor",
-            "roadColor", "roadLeft", "roadRight", "roadStep")
-  CAMERA = ("groundToTex", "camLimits", "camOptics", "maxTan2", "mode", "colorStrength", "paintWhite", "paintYellow", "texture1")
+class _Program:
+  """A shader with its uniform locations; remembers which cached values it already holds."""
 
-  def __init__(self, fragment: str, camera: bool):
+  def __init__(self, fragment: str, names: tuple[str, ...]):
     self.shader = rl.load_shader_from_memory(shaders.VERTEX_SHADER, fragment)
     # raylib falls back to its default shader when compilation fails; treat that as unusable rather than draw garbage
     self.valid = bool(self.shader.id) and self.shader.id != rl.rl_get_shader_id_default()
-    names = self.COMMON + (self.CAMERA if camera else ())
     self.loc = {name: rl.get_shader_location(self.shader, name) for name in names} if self.valid else {}
+    self.keys: dict[str, object] = {}
 
   def set(self, name: str, value, kind, count: int | None = None) -> None:
     loc = self.loc.get(name, -1)
@@ -128,24 +108,53 @@ class _GroundShader:
     else:
       rl.set_shader_value_v(self.shader, loc, value, kind, count)
 
+  def changed(self, group: str, key) -> bool:
+    """True (and remembered) when ``key`` differs from what this program last received for ``group``."""
+    if self.keys.get(group) == key:
+      return False
+    self.keys[group] = key
+    return True
+
   def close(self) -> None:
     if self.valid:
       rl.unload_shader(self.shader)
 
 
+GROUND_UNIFORMS = ("uvToRay", "camPos", "groundZ", "odometer", "time", "fogDistance", "skyTop", "skyHorizon", "groundColor",
+                   "gridColor", "roadColor", "laneY", "roadY", "sampleMaxX", "laneAlpha", "laneDash", "laneInner", "laneOuter",
+                   "edgeStyle", "pathRange", "pathNear", "pathFar", "pathHalfWidth", "laneChange", "stopLine", "lighting",
+                   "bodyPose", "bodySize", "statusGlow")
+CAMERA_UNIFORMS = ("groundToTex", "camLimits", "mode", "colorStrength", "paintWhite", "paintYellow", "texture1")
+VEHICLE_UNIFORMS = ("uvToRay", "camPos", "quad", "pose", "model", "paint", "lights", "extra", "sky")
+
+
+@dataclass
+class Body:
+  """A vehicle to draw: its footprint centre on the road, heading and look."""
+  center: np.ndarray
+  yaw: float
+  look: VehicleLook
+  lights: np.ndarray   # headlights, tail/brake, left, right
+  reverse: float = 0.0
+  tail_glow: float = 0.0
+
+
 class VizRenderer:
   def __init__(self, palette: Palette | None = None):
     self.palette = palette or Palette()
-    self._synthetic: _GroundShader | None = None
-    self._camera: dict[bool, _GroundShader] = {}
-    self._sphere = None
+    self._synthetic: _Program | None = None
+    self._camera: dict[bool, _Program] = {}
+    self._vehicle: _Program | None = None
     self._white = None
     self._odometer = 0.0
-    self._throttle_blend = FirstOrderFilter(1.0, 0.25, 0.05)
-    self._road_cache_frame = -2
-    self._road_cache: tuple[np.ndarray | None, np.ndarray | None] = (None, None)
-    self._ribbon_key: tuple | None = None
-    self._ribbon_cache = _Ribbons([], np.empty((0, 3)), None)
+    self._time = 0.0
+    self._throttle = FirstOrderFilter(1.0, 0.25, 0.05)
+    self._stop_x = FirstOrderFilter(30.0, 0.25, 0.05)
+    self._stop_alpha = FirstOrderFilter(0.0, 0.2, 0.05)
+    self._change = FirstOrderFilter(0.0, 0.25, 0.05)
+    self._change_direction = 0
+    self._dash = FirstOrderFilter(np.ones(4), 0.6, 0.05)
+    self._dash_revision = -1
     self.last_camera: VirtualCamera | None = None
 
   # ---- resources
@@ -156,23 +165,21 @@ class VizRenderer:
       self._white = rl.load_texture_from_image(image)
       rl.unload_image(image)
     if self._synthetic is None:
-      self._synthetic = _GroundShader(shaders.SYNTHETIC_GROUND_SHADER, camera=False)
+      self._synthetic = _Program(shaders.SYNTHETIC_GROUND_SHADER, GROUND_UNIFORMS)
       if not self._synthetic.valid:
         raise RuntimeError("scene views: synthetic ground shader failed to compile")
-    if self._sphere is None:
-      self._sphere = rl.load_shader_from_memory(shaders.VERTEX_SHADER, shaders.SPHERE_SHADER)
-      if not self._sphere.id or self._sphere.id == rl.rl_get_shader_id_default():
-        raise RuntimeError("scene views: sphere shader failed to compile")
-      loc = rl.get_shader_location(self._sphere, "lightDir")
-      rl.set_shader_value(self._sphere, loc, LIGHT_DIR, UNIFORM_VEC3)
+    if self._vehicle is None:
+      self._vehicle = _Program(shaders.VEHICLE_SHADER, VEHICLE_UNIFORMS)
+      if not self._vehicle.valid:
+        cloudlog.error("scene views: vehicle shader failed to compile, vehicles are hidden")
 
-  def _camera_shader(self, egl: bool) -> _GroundShader | None:
+  def _camera_program(self, egl: bool) -> _Program | None:
     """None when this GPU could not compile it; camera modes then fall back to the synthetic ground."""
     if egl not in self._camera:
       # StarPilot's camera colour treatment, so reprojected video matches the stock view (imported where it is needed;
       # the stock CameraView already loaded it)
       from openpilot.starpilot.ui.camera_color import ROAD_COLOR_SHADER
-      program = _GroundShader(shaders.camera_ground_shader(egl, ROAD_COLOR_SHADER), camera=True)
+      program = _Program(shaders.camera_ground_shader(egl, ROAD_COLOR_SHADER), GROUND_UNIFORMS + CAMERA_UNIFORMS)
       if not program.valid:
         cloudlog.error("scene views: camera ground shader failed to compile, showing the synthetic road instead")
       self._camera[egl] = program
@@ -180,13 +187,10 @@ class VizRenderer:
     return program if program.valid else None
 
   def close(self) -> None:
-    for program in (self._synthetic, *self._camera.values()):
+    for program in (self._synthetic, self._vehicle, *self._camera.values()):
       if program is not None:
         program.close()
-    self._synthetic, self._camera = None, {}
-    if self._sphere is not None and self._sphere.id:
-      rl.unload_shader(self._sphere)
-    self._sphere = None
+    self._synthetic, self._vehicle, self._camera = None, None, {}
     if self._white is not None and self._white.id:
       rl.unload_texture(self._white)
     self._white = None
@@ -194,190 +198,285 @@ class VizRenderer:
   # ---- frame
 
   def render(self, rect: rl.Rectangle, rig: Rig, camera: VirtualCamera, scene: Scene, mode: VizMode, *, dt: float,
-             frame: FrameTextures | None = None, source: CameraGeometry | None = None, color_strength: float = 1.0,
-             status: str = "disengaged") -> None:
+             style: SceneStyle | None = None, road_style: dict | None = None, frame: FrameTextures | None = None,
+             source: CameraGeometry | None = None, color_strength: float = 1.0, status: str = "disengaged",
+             blink_time: float | None = None) -> None:
     self._ensure()
     self.last_camera = camera
-    style = MODE_STYLES[mode]
-    self._odometer = (self._odometer + max(scene.v_ego, 0.0) * dt) % 1000.0
-    self._throttle_blend.update(1.0 if scene.allow_throttle else 0.0)
+    style = style or SceneStyle()
+    mode_style = MODE_STYLES[mode]
+    self._odometer = (self._odometer + max(scene.v_ego, 0.0) * dt) % ODOMETER_WRAP
+    self._time += dt
+    blink_on = ((self._time if blink_time is None else blink_time) % BLINK_PERIOD) < BLINK_PERIOD / 2
+    self._throttle.update(1.0 if scene.allow_throttle else 0.0)
 
-    program = self._camera_shader(frame.egl) if style.shader_mode and frame is not None and source is not None else None
+    program = self._camera_program(frame.egl) if mode_style.shader_mode and frame is not None and source is not None else None
+    bodies = self._bodies(rig, scene, style, blink_on) if scene.valid else []
+    ground = program or self._synthetic
+    rl.begin_shader_mode(ground.shader)
+    self._ground_uniforms(ground, rect, rig, camera, scene, mode_style, road_style, bodies, status)
     if program is not None:
-      self._draw_camera_ground(program, rect, camera, scene, style, frame, source, color_strength)
+      self._camera_uniforms(program, scene, mode_style, frame, source, color_strength)
+      src = rl.Rectangle(0, 0, float(frame.texture.width), float(frame.texture.height))
+      rl.draw_texture_pro(frame.texture, src, rect, rl.Vector2(0, 0), 0.0, rl.WHITE)
     else:
-      self._draw_synthetic_ground(rect, camera, scene, style)
+      rl.draw_texture_pro(self._white, rl.Rectangle(0, 0, 1, 1), rect, rl.Vector2(0, 0), 0.0, rl.WHITE)
+    rl.end_shader_mode()
     if not scene.valid:
       return
-
-    self._draw_road(rect, rig, camera, scene, style)
-    self._draw_path(rect, rig, camera, scene, style)
-    self._draw_bodies(rig, camera, scene, status)
+    if rig.stop_curtain:
+      self._draw_stop_curtain(rect, camera, scene)
+    self._draw_vehicles(rect, camera, scene, bodies)
 
   # ---- ground
 
-  def _ground_uniforms(self, program: _GroundShader, rect: rl.Rectangle, camera: VirtualCamera, scene: Scene, style: ModeStyle) -> None:
+  def _ground_uniforms(self, program: _Program, rect: rl.Rectangle, rig: Rig, camera: VirtualCamera, scene: Scene,
+                       mode_style: ModeStyle, road_style: dict | None, bodies: list[Body], status: str) -> None:
     p = self.palette
+    if program.changed("constants", p):
+      program.set("fogDistance", _f32(p.fog_distance), UNIFORM_FLOAT)
+      program.set("skyTop", _vec4(p.sky_top), UNIFORM_VEC4)
+      program.set("skyHorizon", _vec4(p.sky_horizon), UNIFORM_VEC4)
+      program.set("groundColor", _vec4(p.ground), UNIFORM_VEC4)
+      program.set("gridColor", _vec4(p.grid), UNIFORM_VEC4)
+      program.set("sampleMaxX", _f32(SAMPLE_MAX_X), UNIFORM_FLOAT)
+
+    # camera
     uv_to_ray = camera.uv_to_ray((rect.x, rect.y, rect.width, rect.height))
     program.set("uvToRay", np.ascontiguousarray(uv_to_ray.T, dtype=np.float32), UNIFORM_VEC3, 3)
     program.set("camPos", camera.position.astype(np.float32), UNIFORM_VEC3)
-    program.set("groundZ", np.array([scene.height], dtype=np.float32), UNIFORM_FLOAT)
-    program.set("odometer", np.array([self._odometer], dtype=np.float32), UNIFORM_FLOAT)
-    program.set("gridSize", np.array([p.grid_size], dtype=np.float32), UNIFORM_FLOAT)
-    program.set("fogDistance", np.array([p.fog_distance], dtype=np.float32), UNIFORM_FLOAT)
-    program.set("skyTop", _vec4(p.sky_top), UNIFORM_VEC4)
-    program.set("skyHorizon", _vec4(p.sky_horizon), UNIFORM_VEC4)
-    program.set("groundColor", _vec4(p.ground), UNIFORM_VEC4)
-    program.set("gridColor", _vec4(p.grid), UNIFORM_VEC4)
-    left, right = self._road_samples(scene)
-    program.set("roadColor", _vec4(style.road_surface if left is not None else (0, 0, 0, 0)), UNIFORM_VEC4)
-    if left is not None:
-      program.set("roadLeft", left, UNIFORM_FLOAT, shaders.ROAD_SAMPLES)
-      program.set("roadRight", right, UNIFORM_FLOAT, shaders.ROAD_SAMPLES)
-    program.set("roadStep", np.array([shaders.ROAD_STEP], dtype=np.float32), UNIFORM_FLOAT)
+    program.set("groundZ", _f32(scene.height), UNIFORM_FLOAT)
+    program.set("odometer", _f32(self._odometer), UNIFORM_FLOAT)
+    program.set("time", _f32(self._time % 1000.0), UNIFORM_FLOAT)
 
-  def _road_samples(self, scene: Scene) -> tuple[np.ndarray | None, np.ndarray | None]:
-    """The model's road edges resampled at fixed distances for the ground shader (cached per model frame)."""
-    if self._road_cache_frame == scene.model_frame:
-      return self._road_cache
-    left = right = None
-    if scene.valid and len(scene.road_edges) == 2 and all(len(edge) > 1 for edge in scene.road_edges):
-      xs = np.arange(shaders.ROAD_SAMPLES) * shaders.ROAD_STEP
-      left = np.interp(xs, scene.road_edges[0][:, 0], scene.road_edges[0][:, 1]).astype(np.float32)
-      right = np.interp(xs, scene.road_edges[1][:, 0], scene.road_edges[1][:, 1]).astype(np.float32)
-    self._road_cache_frame, self._road_cache = scene.model_frame, (left, right)
-    return left, right
+    # geometry: once per model frame
+    has_road = scene.valid and scene.road_samples is not None and len(scene.road_edges) == 2
+    lane_rgb = mode_style.lane_rgb
+    inner = _hex((road_style or {}).get("pathEdge")) if lane_rgb is None else None
+    outer = _hex((road_style or {}).get("laneLines")) if lane_rgb is None else None
+    if program.changed("geometry", (scene.revision, mode_style, rig.angle, inner, outer)):
+      if scene.valid and scene.lane_samples is not None:
+        program.set("laneY", scene.lane_samples, UNIFORM_VEC4, shaders.SAMPLES)
+        program.set("roadY", scene.road_samples, UNIFORM_VEC4, shaders.SAMPLES)
+        probs = np.zeros(4, dtype=np.float32)
+        probs[:len(scene.lane_probs)] = np.clip(scene.lane_probs[:4], 0.0, 1.0)
+        stds = np.ones(2)
+        stds[:len(scene.road_edge_stds)] = scene.road_edge_stds[:2]
+        edges = np.clip(1.0 - stds, 0.0, 1.0) * mode_style.edge_alpha
+      else:
+        probs, edges = np.zeros(4, dtype=np.float32), np.zeros(2)
+      cap = 0.7 if inner is not None or outer is not None else 1.0  # StarPilot's custom lane colours cap at 70 %
+      program.set("laneAlpha", np.minimum(probs, cap).astype(np.float32) * mode_style.lane_alpha, UNIFORM_VEC4)
+      program.set("edgeStyle", _f32(edges[0], edges[1], rig.edge_half_width, rig.lane_half_width * mode_style.lane_width_scale),
+                  UNIFORM_VEC4)
+      white = (*(lane_rgb or (245, 245, 245)), 255)
+      program.set("laneInner", _vec4(inner or white), UNIFORM_VEC4)
+      program.set("laneOuter", _vec4(outer or white), UNIFORM_VEC4)
+      program.set("roadColor", _vec4(mode_style.road_surface if has_road else (0, 0, 0, 0)), UNIFORM_VEC4)
+      program.set("pathHalfWidth", _f32(rig.path_half_width), UNIFORM_FLOAT)
+    program.set("laneDash", self._lane_dashes(scene).astype(np.float32), UNIFORM_VEC4)
 
-  def _draw_synthetic_ground(self, rect: rl.Rectangle, camera: VirtualCamera, scene: Scene, style: ModeStyle) -> None:
-    program = self._synthetic
-    rl.begin_shader_mode(program.shader)
-    self._ground_uniforms(program, rect, camera, scene, style)
-    rl.draw_texture_pro(self._white, rl.Rectangle(0, 0, 1, 1), rect, rl.Vector2(0, 0), 0.0, rl.WHITE)
-    rl.end_shader_mode()
+    # path
+    path_mode, near, far = self._path_colors(road_style, mode_style)
+    start = 0.0 if not rig.show_ego else scene.ego_ground[0] + EGO_LENGTH / 2 - 0.3
+    end = scene.path_end if scene.valid and len(scene.path) > 1 and scene.path_end - start >= 1.5 else 0.0
+    program.set("pathRange", _f32(start, end, mode_style.path_alpha if end > start else 0.0, path_mode), UNIFORM_VEC4)
+    program.set("pathNear", near, UNIFORM_VEC4)
+    program.set("pathFar", far, UNIFORM_VEC4)
 
-  def _draw_camera_ground(self, program: _GroundShader, rect: rl.Rectangle, camera: VirtualCamera, scene: Scene, style: ModeStyle,
-                          frame: FrameTextures, source: CameraGeometry, color_strength: float) -> None:
+    # lane change, stop line, lights
+    program.set("laneChange", self._lane_change(scene), UNIFORM_VEC4)
+    program.set("stopLine", self._stop_line(scene), UNIFORM_VEC4)
+    darkness = scene.darkness
+    program.set("lighting", _f32(darkness, float(np.clip((darkness - 0.3) / 0.4, 0.0, 1.0)), RADAR_TO_CAMERA, 0.0), UNIFORM_VEC4)
+
+    poses = np.zeros((shaders.MAX_BODIES, 4), dtype=np.float32)
+    sizes = np.zeros((shaders.MAX_BODIES, 4), dtype=np.float32)
+    for i, body in enumerate(bodies[:shaders.MAX_BODIES]):
+      _, length, width, _ = VEHICLE_MODELS[body.look.model]
+      poses[i] = (body.center[0], body.center[1], math.cos(body.yaw), math.sin(body.yaw))
+      round_body = body.look.model == VehicleModel.SPHERE
+      sizes[i] = (length / 2 * (0.6 if round_body else 1.0), width / 2 * (0.6 if round_body else 1.0), 0.55, body.tail_glow)
+    program.set("bodyPose", poses, UNIFORM_VEC4, shaders.MAX_BODIES)
+    program.set("bodySize", sizes, UNIFORM_VEC4, shaders.MAX_BODIES)
+    glow = STATUS_GLOW.get(status) if rig.show_ego and bodies else None
+    program.set("statusGlow", _f32(*(glow or (0.0, 0.0, 0.0, 0.0))), UNIFORM_VEC4)
+
+  def _camera_uniforms(self, program: _Program, scene: Scene, mode_style: ModeStyle, frame: FrameTextures, source: CameraGeometry,
+                       color_strength: float) -> None:
     k = source.intrinsics
     # road plane (X, Y, 1) -> camera pixels -> texture uv
     ground = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, scene.height]])
     to_uv = np.diag([1.0 / frame.uv_width, 1.0 / frame.uv_height, 1.0])
     ground_to_tex = to_uv @ k @ source.view_from_calib @ ground
-    near, fade_start, fade_end, max_v, max_tan2 = CAMERA_LIMITS[source.wide]
-    optics = np.array([k[0, 2] / frame.uv_width, k[1, 2] / frame.uv_height, k[0, 0] / frame.uv_width, k[1, 1] / frame.uv_height],
-                      dtype=np.float32)
-
-    rl.begin_shader_mode(program.shader)
-    self._ground_uniforms(program, rect, camera, scene, style)
     program.set("groundToTex", np.ascontiguousarray(ground_to_tex.T, dtype=np.float32), UNIFORM_VEC3, 3)
-    program.set("camLimits", np.array([near, fade_start, fade_end, max_v], dtype=np.float32), UNIFORM_VEC4)
-    program.set("camOptics", optics, UNIFORM_VEC4)
-    program.set("maxTan2", np.array([max_tan2], dtype=np.float32), UNIFORM_FLOAT)
-    program.set("mode", np.array([style.shader_mode], dtype=np.int32), UNIFORM_INT)
-    program.set("colorStrength", np.array([color_strength], dtype=np.float32), UNIFORM_FLOAT)
-    program.set("paintWhite", _vec4((240, 240, 240, 255)), UNIFORM_VEC4)
-    program.set("paintYellow", _vec4((250, 200, 40, 255)), UNIFORM_VEC4)
+    program.set("camLimits", _f32(*CAMERA_LIMITS[source.wide]), UNIFORM_VEC4)
+    program.set("mode", np.array([mode_style.shader_mode], dtype=np.int32), UNIFORM_INT)
+    program.set("colorStrength", _f32(color_strength), UNIFORM_FLOAT)
+    if program.changed("paint", True):
+      program.set("paintWhite", _vec4((240, 240, 240, 255)), UNIFORM_VEC4)
+      program.set("paintYellow", _vec4((250, 200, 40, 255)), UNIFORM_VEC4)
     if frame.uv is not None and program.loc.get("texture1", -1) >= 0:
       rl.set_shader_value_texture(program.shader, program.loc["texture1"], frame.uv)
-    src = rl.Rectangle(0, 0, float(frame.texture.width), float(frame.texture.height))
-    rl.draw_texture_pro(frame.texture, src, rect, rl.Vector2(0, 0), 0.0, rl.WHITE)
+
+  def _lane_dashes(self, scene: Scene) -> np.ndarray:
+    """Lines right beside a road edge are solid edge lines; lines between lanes are dashed (smoothed over time)."""
+    if scene.revision != self._dash_revision and scene.valid and scene.lane_samples is not None and len(scene.road_edges) == 2:
+      self._dash_revision = scene.revision
+      window = slice(6, 14)  # about 5 to 45 m ahead
+      lanes = scene.lane_samples[window]
+      edges = scene.road_samples[window, :2]
+      gap = np.minimum(np.abs(lanes - edges[:, :1]), np.abs(lanes - edges[:, 1:2])).mean(axis=0)
+      self._dash.update((gap > 1.1).astype(np.float64))
+    return np.round(self._dash.x * 4.0) / 4.0
+
+  def _path_colors(self, road_style: dict | None, mode_style: ModeStyle) -> tuple[float, np.ndarray, np.ndarray]:
+    """Shader colour mode and near/far colours following StarPilot's path style (stock throttle colours without one)."""
+    if road_style is not None:
+      from openpilot.starpilot.ui.road_colors import path_mode
+      chosen = path_mode(road_style)
+      if chosen == "rainbow":
+        return 3.0, _vec4((255, 255, 255, 255)), _vec4((255, 255, 255, 0))
+      if chosen == "acceleration":
+        return 2.0, _vec4((255, 255, 255, 255)), _vec4((255, 255, 255, 0))
+      color = _hex(road_style.get("path")) or (48, 255, 156, 255)
+      return 1.0, _vec4((*color[:3], color[3] * 0.75)), _vec4((*color[:3], 0))
+    blend = float(np.clip(self._throttle.x, 0.0, 1.0))
+    near = [a + (b - a) * blend for a, b in zip(NO_THROTTLE[0], THROTTLE[0], strict=True)]
+    far = [a + (b - a) * blend for a, b in zip(NO_THROTTLE[1], THROTTLE[1], strict=True)]
+    near[3] = 190  # the stock 40 % alpha disappears on a dark synthetic road
+    return 0.0, _vec4(near), _vec4(far)
+
+  def _lane_change(self, scene: Scene) -> np.ndarray:
+    target = {1: 0.55 + 0.25 * math.sin(self._time * 5.0), 2: 1.0, 3: 0.35}.get(scene.lane_change, 0.0)
+    if scene.lane_change_direction == 0:
+      target = 0.0
+    else:
+      self._change_direction = scene.lane_change_direction
+    strength = self._change.update(target)
+    signals = scene.signals
+    blocked = signals.left_blindspot if self._change_direction < 0 else signals.right_blindspot
+    return _f32(self._change_direction, strength if strength > 0.01 else 0.0, 1.0 if blocked else 0.0, 0.0)
+
+  def _stop_line(self, scene: Scene) -> np.ndarray:
+    if scene.stop_x is not None:
+      if self._stop_alpha.x < 0.02:
+        self._stop_x.x = scene.stop_x  # appear in place rather than slide in
+      self._stop_x.update(scene.stop_x)
+    alpha = self._stop_alpha.update(1.0 if scene.stop_x is not None else 0.0)
+    return _f32(self._stop_x.x, alpha if alpha > 0.01 else 0.0, 0.0, 0.0)
+
+  # ---- vehicles
+
+  def _bodies(self, rig: Rig, scene: Scene, style: SceneStyle, blink_on: bool) -> list[Body]:
+    """Our car first (when the angle shows it), then the leads."""
+    signals = scene.signals
+    night = float(np.clip((scene.darkness - 0.3) / 0.4, 0.0, 1.0))
+    tail = 0.35 * night
+    bodies = []
+    if rig.show_ego:
+      _, length, _, _ = VEHICLE_MODELS[style.ego.model]
+      center = np.array([RADAR_TO_CAMERA - length / 2, 0.0, scene.height])
+      lights = _f32(night, 1.0 if signals.braking else tail, float(signals.left_blinker and blink_on),
+                    float(signals.right_blinker and blink_on))
+      bodies.append(Body(center, 0.0, style.ego, lights, reverse=float(signals.reverse),
+                         tail_glow=0.6 * night + (0.5 if signals.braking else 0.0) * max(night, 0.25)))
+    for lead in scene.leads:
+      _, length, _, _ = VEHICLE_MODELS[style.lead.model]
+      forward = np.array([math.cos(lead.heading), math.sin(lead.heading), 0.0])
+      center = lead.rear + forward * (length / 2)
+      lights = _f32(night, 1.0 if lead.braking else tail, 0.0, 0.0)
+      bodies.append(Body(center, lead.heading, style.lead, lights,
+                         tail_glow=0.6 * night + (0.5 if lead.braking else 0.0) * max(night, 0.25)))
+    return bodies
+
+  def _draw_vehicles(self, rect: rl.Rectangle, camera: VirtualCamera, scene: Scene, bodies: list[Body]) -> None:
+    program = self._vehicle
+    if program is None or not program.valid or not bodies:
+      return
+    r = (rect.x, rect.y, rect.width, rect.height)
+    sky = _vec4(self.palette.sky_horizon)
+    pixel = 1.0 / max(camera.focal, 1.0)
+    items = []
+    for body in bodies:
+      box = self._screen_box(camera, body, r)
+      if box is not None:
+        depth = float(camera.homogeneous(body.center[None, :])[0, 2])
+        items.append((depth, body, box))
+    if not items:
+      return
+    rl.begin_shader_mode(program.shader)
+    program.set("uvToRay", np.ascontiguousarray(camera.uv_to_ray(r).T, dtype=np.float32), UNIFORM_VEC3, 3)
+    program.set("camPos", camera.position.astype(np.float32), UNIFORM_VEC3)
+    program.set("sky", sky, UNIFORM_VEC4)
+    wheel_turn = 0.0
+    for _depth, body, (x0, y0, x1, y1) in sorted(items, key=lambda item: -item[0]):  # far to near
+      model, _, _, radius = VEHICLE_MODELS[body.look.model]
+      wheel_turn = (self._odometer / radius) % (2 * math.pi)
+      program.set("quad", _f32((x0 - r[0]) / r[2], (y0 - r[1]) / r[3], (x1 - x0) / r[2], (y1 - y0) / r[3]), UNIFORM_VEC4)
+      program.set("pose", _f32(body.center[0], body.center[1], body.center[2], body.yaw), UNIFORM_VEC4)
+      program.set("model", np.array([model], dtype=np.int32), UNIFORM_INT)
+      program.set("paint", _f32(*(c / 255.0 for c in body.look.rgb), GLOSS[body.look.model]), UNIFORM_VEC4)
+      program.set("lights", body.lights, UNIFORM_VEC4)
+      program.set("extra", _f32(body.reverse, scene.darkness, pixel, wheel_turn), UNIFORM_VEC4)
+      rl.draw_texture_pro(self._white, rl.Rectangle(0, 0, 1, 1), rl.Rectangle(x0, y0, x1 - x0, y1 - y0), rl.Vector2(0, 0),
+                          0.0, rl.WHITE)
+      rl.rl_draw_render_batch_active()  # each vehicle has its own uniforms
     rl.end_shader_mode()
-
-  # ---- model geometry
-
-  def _ribbons(self, rig: Rig, scene: Scene, style: ModeStyle) -> _Ribbons:
-    """Road-frame ribbons only change with a new model/radar message, so build them once per scene revision."""
-    key = (scene.revision, rig.angle, style)
-    if key == self._ribbon_key:
-      return self._ribbon_cache
-    lines: list[tuple[np.ndarray, np.ndarray, rl.Color]] = []
-    for i, edge in enumerate(scene.road_edges):
-      std = scene.road_edge_stds[i] if i < len(scene.road_edge_stds) else 1.0
-      alpha = float(np.clip(1.0 - std, 0.0, 1.0)) * style.edge_alpha
-      if alpha > 0.01 and len(edge) > 1:
-        lines.append((*offset_line(clip_line(edge, MAX_LINE_DISTANCE), rig.edge_half_width), _color((255, 40, 40, 255 * alpha))))
-    for i, line in enumerate(scene.lane_lines):
-      prob = scene.lane_probs[i] if i < len(scene.lane_probs) else 0.0
-      alpha = float(np.clip(prob, 0.0, 1.0)) * style.lane_alpha
-      if alpha > 0.01 and len(line) > 1:
-        half_width = rig.lane_half_width * style.lane_width_scale
-        lines.append((*offset_line(clip_line(line, MAX_LINE_DISTANCE), half_width), _color((*style.lane_rgb, 255 * alpha))))
-    # The path stops at the lead's rear bumper instead of running underneath it.
-    end = MAX_LINE_DISTANCE if not scene.leads else max(RADAR_TO_CAMERA + scene.leads[0].d_rel - 0.5, 0.0)
-    path = clip_line(scene.path, end) if len(scene.path) > 1 else scene.path
-    long_enough = len(path) > 1 and path[-1, 0] - path[0, 0] >= MIN_PATH_LENGTH
-    path_edges = offset_line(path, PATH_HALF_WIDTH) if long_enough else None
-    self._ribbon_key, self._ribbon_cache = key, _Ribbons(lines, path, path_edges)
-    return self._ribbon_cache
-
-  def _draw_road(self, rect: rl.Rectangle, rig: Rig, camera: VirtualCamera, scene: Scene, style: ModeStyle) -> None:
-    for left, right, color in self._ribbons(rig, scene, style).lines:
-      polygon = project_ribbon(camera, left, right)
-      if polygon is not None:
-        draw_polygon(rect, polygon, color)
-
-  def _draw_path(self, rect: rl.Rectangle, rig: Rig, camera: VirtualCamera, scene: Scene, style: ModeStyle) -> None:
-    ribbons = self._ribbons(rig, scene, style)
-    if ribbons.path_edges is None:
-      return
-    polygon = project_ribbon(camera, *ribbons.path_edges)
-    if polygon is None:
-      return
-    gradient = None
-    if scene.experimental and len(scene.path_accel) == len(scene.path):
-      gradient = self._accel_gradient(rect, camera, scene, ribbons.path, style.path_alpha)
-    else:
-      blend = float(np.clip(self._throttle_blend.x, 0.0, 1.0))
-      colors = [_color(tuple(a + (b - a) * blend for a, b in zip(off, on, strict=True)), style.path_alpha)
-                for off, on in zip(NO_THROTTLE, THROTTLE, strict=True)]
-      gradient = Gradient(start=(0.0, 1.0), end=(0.0, 0.0), colors=colors, stops=[0.0, 0.5, 1.0])
-    if gradient is None:
-      draw_polygon(rect, polygon, _color((255, 255, 255, 30), style.path_alpha))
-    else:
-      draw_polygon(rect, polygon, gradient=gradient)
 
   @staticmethod
-  def _accel_gradient(rect: rl.Rectangle, camera: VirtualCamera, scene: Scene, path: np.ndarray, alpha_scale: float) -> Gradient | None:
-    """Experimental mode: hue by planned acceleration along the path (stock colouring, screen-space stops)."""
-    xs = np.linspace(path[0, 0], path[-1, 0], 8)
-    points = np.column_stack((xs, np.interp(xs, path[:, 0], path[:, 1]), np.interp(xs, path[:, 0], path[:, 2])))
-    ys = camera.project(points)[0][:, 1]
-    ok = np.isfinite(ys)
-    if ok.sum() < 2:
+  def _screen_box(camera: VirtualCamera, body: Body, rect) -> tuple[float, float, float, float] | None:
+    """Screen rectangle covering the vehicle and the glow of its lamps, clipped to the layer; None when off screen."""
+    _, length, width, _ = VEHICLE_MODELS[body.look.model]
+    height = VEHICLE_HEIGHT[body.look.model]
+    hl, hw = length / 2 + 0.5, width / 2 + 0.5  # room for lamp glow
+    c, s = math.cos(body.yaw), math.sin(body.yaw)
+    corners = np.array([[sx * hl, sy * hw] for sx in (-1, 1) for sy in (-1, 1)])
+    xy = body.center[:2] + np.column_stack((corners[:, 0] * c - corners[:, 1] * s, corners[:, 0] * s + corners[:, 1] * c))
+    points = np.vstack((np.column_stack((xy, np.full(4, body.center[2] + 0.3))),
+                        np.column_stack((xy, np.full(4, body.center[2] - height - 0.4)))))
+    screen, depth = camera.project(points)
+    x, y, w, h = rect
+    if (depth < 0.3).all():
       return None
-    accel = np.interp(xs[ok], scene.path[:, 0], scene.path_accel)
-    stops = np.clip(1.0 - (ys[ok] - rect.y) / rect.height, 0.0, 1.0)
-    saturation = np.minimum(np.abs(accel * 1.5), 1.0)
-    rgb = _hls_to_rgb(np.clip(60 + accel * 35, 0, 120) / 360.0, np.interp(saturation, [0.0, 1.0], [0.95, 0.62]), saturation)
-    alpha = np.interp(stops, [0.75 / 2.0, 0.75], [0.4, 0.0]) * alpha_scale
-    order = np.argsort(stops)
-    colors = [rl.Color(int(rgb[i, 0] * 255), int(rgb[i, 1] * 255), int(rgb[i, 2] * 255), int(np.clip(alpha[i] * 255, 0, 255))) for i in order]
-    return Gradient(start=(0.0, 1.0), end=(0.0, 0.0), colors=colors, stops=[float(stops[i]) for i in order])
+    if (depth < 0.3).any():
+      return x, y, x + w, y + h  # partly behind the camera: let the shader find it anywhere
+    pad = 12.0  # px, minimum glow around small, distant vehicles
+    x0, y0 = screen.min(axis=0) - pad
+    x1, y1 = screen.max(axis=0) + pad
+    x0, y0, x1, y1 = max(x0, x), max(y0, y), min(x1, x + w), min(y1, y + h)
+    if x1 - x0 < 1 or y1 - y0 < 1:
+      return None
+    return float(x0), float(y0), float(x1), float(y1)
 
-  # ---- spheres
+  # ---- stop line glow wall
 
-  def _draw_bodies(self, rig: Rig, camera: VirtualCamera, scene: Scene, status: str) -> None:
-    bodies = []  # (center, radius, rgb, alpha)
-    if rig.show_ego:
-      bodies.append((scene.ego_center, EGO_RADIUS, EGO_COLORS.get(status, EGO_COLORS["disengaged"]), 255))
-    for lead in scene.leads:
-      closing = float(np.clip(-lead.v_rel / 8.0, 0.0, 1.0))
-      near = float(np.clip(1.0 - lead.d_rel / 60.0, 0.0, 1.0))
-      rgb = LEAD_COLOR if lead.primary else SECOND_LEAD_COLOR
-      rgb = tuple(int(c * (0.65 + 0.35 * max(closing, near))) for c in rgb)
-      bodies.append((lead.center, LEAD_RADIUS, rgb, 255 if lead.primary else 200))
+  def _draw_stop_curtain(self, rect: rl.Rectangle, camera: VirtualCamera, scene: Scene) -> None:
+    """A low glowing wall standing on the stop line, so it reads from behind as well as from above. It fades out as
+    the stop gets close (stopped at it, the line on the road is enough)."""
+    x = float(self._stop_x.x)
+    alpha = float(self._stop_alpha.x) * float(np.clip((x - RADAR_TO_CAMERA - 5.0) / 10.0, 0.0, 1.0))
+    if alpha <= 0.02 or scene.lane_samples is None:
+      return
+    from openpilot.system.ui.lib.shader_polygon import Gradient, draw_polygon
+    lanes = [float(np.interp(x, SAMPLE_X, scene.lane_samples[:, i])) for i in (1, 2)]
+    lo, hi = min(lanes), max(lanes)
+    if not 2.0 <= hi - lo <= 6.0:
+      center = float(np.interp(x, SAMPLE_X, scene.road_samples[:, 2]))
+      lo, hi = center - 1.8, center + 1.8
+    ground, top = scene.height, scene.height - 0.7
+    quad = np.array([[x, lo - 0.15, ground], [x, hi + 0.15, ground], [x, hi + 0.15, top], [x, lo - 0.15, top]])
+    screen, depth = camera.project(quad)
+    if (depth < 0.3).any() or not np.isfinite(screen).all():
+      return
+    bottom = screen[:2].mean(axis=0)
+    upper = screen[2:].mean(axis=0)
+    if np.linalg.norm(upper - bottom) < 3.0:
+      return  # edge-on
+    polygon = np.ascontiguousarray(screen[[0, 3, 2, 1]], dtype=np.float32)  # left side up, then the right side down
+    start = ((bottom[0] - rect.x) / rect.width, (bottom[1] - rect.y) / rect.height)
+    end = ((upper[0] - rect.x) / rect.width, (upper[1] - rect.y) / rect.height)
+    pulse = 0.85 + 0.15 * math.sin(self._time * 4.5)
+    colors = [rl.Color(255, 40, 30, int(150 * alpha * pulse)), rl.Color(255, 40, 30, int(45 * alpha * pulse)), rl.Color(255, 40, 30, 0)]
+    draw_polygon(rect, polygon, gradient=Gradient(start=start, end=end, colors=colors, stops=[0.0, 0.35, 1.0]))
 
-    projected = []
-    for center, radius, rgb, alpha in bodies:
-      shadow = ground_disc((center[0], center[1], center[2] + radius), radius * 1.15)
-      xy, depth = camera.project(shadow)
-      if np.isfinite(xy).all():
-        rl.draw_triangle_strip(np.ascontiguousarray(xy, dtype=np.float32), len(xy), rl.Color(0, 0, 0, 105))
-      hit = camera.project_point(center, near=radius + 0.2)
-      if hit is not None:
-        projected.append((hit[2], hit[0], hit[1], max(camera.focal * radius / hit[2], 3.0), rgb, alpha))
-
-    rl.begin_shader_mode(self._sphere)
-    for _depth, x, y, r, rgb, alpha in sorted(projected, reverse=True):  # far to near
-      rl.draw_texture_pro(self._white, rl.Rectangle(0, 0, 1, 1), rl.Rectangle(x - r, y - r, 2 * r, 2 * r),
-                          rl.Vector2(0, 0), 0.0, rl.Color(*rgb, alpha))
-    rl.end_shader_mode()

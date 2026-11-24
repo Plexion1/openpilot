@@ -1,7 +1,8 @@
-"""On-screen VIEW / MODE switcher drawn in the bottom-right corner of the onroad camera layer.
+"""The VIEW / MODE switcher: two stacked buttons that cycle the camera angle and the visualization mode.
 
-Taps reach it only when no StarPilot control claimed them (it is consulted where a tap would otherwise toggle the
-sidebar), so it can never take a touch away from an existing onroad control.
+Drawn by the ``scene_view_switcher`` onroad widget (widgets.py), so it can be moved, hidden and layered from Galaxy's
+layout editor like any other widget. Taps reach it only when no StarPilot control claimed them (it is consulted where
+a tap would otherwise toggle the sidebar), so it never takes a touch away from an existing onroad control.
 """
 from __future__ import annotations
 
@@ -10,9 +11,9 @@ import time
 from openpilot.starpilot.ui.raylib import rl
 from openpilot.starpilot.ui.viz.options import ANGLE_LABELS, MODE_LABELS, VizSelection
 
-WIDTH, HEIGHT = 250, 104   # px on the 2160x1080 large UI (about 16 x 6.5 mm)
-GAP, MARGIN = 14, 24
-STALE_AFTER = 0.5          # s; buttons not drawn recently are not tappable
+WIDTH, HEIGHT, GAP = 250, 104, 14   # px on the 2160x1080 large UI; the widget box is WIDTH x SIZE[1]
+SIZE = (WIDTH, 2 * HEIGHT + GAP)
+STALE_AFTER = 0.5                   # s; buttons not drawn recently are not tappable
 
 
 def _font():
@@ -37,29 +38,43 @@ class VizControls:
     self._drawn_at = 0.0
 
   @staticmethod
-  def layout(rect: rl.Rectangle) -> dict[str, rl.Rectangle]:
-    x = rect.x + rect.width - MARGIN - WIDTH
-    mode_y = rect.y + rect.height - MARGIN - HEIGHT
-    return {"angle": rl.Rectangle(x, mode_y - GAP - HEIGHT, WIDTH, HEIGHT), "mode": rl.Rectangle(x, mode_y, WIDTH, HEIGHT)}
+  def layout(x: float, y: float) -> dict[str, rl.Rectangle]:
+    return {"angle": rl.Rectangle(x, y, WIDTH, HEIGHT), "mode": rl.Rectangle(x, y + HEIGHT + GAP, WIDTH, HEIGHT)}
 
-  def render(self, rect: rl.Rectangle, selection: VizSelection) -> None:
-    self._targets = self.layout(rect)
+  def render(self, x: float, y: float, selection: VizSelection, fill: rl.Color | None = None,
+             border: rl.Color | None = None, text: rl.Color | None = None, *, fonts=None) -> None:
+    """``fonts`` is the onroad view's BitmapFonts, so the labels match the rest of the HUD."""
+    self._targets = self.layout(x, y)
     self._drawn_at = time.monotonic()
-    font = _font()
+    font = fonts if fonts is not None else _font()
+    fill = fill or rl.Color(0, 0, 0, 150)
+    border = border or rl.Color(255, 255, 255, 80)
+    text = text or rl.WHITE
+    caption_color = rl.Color(text.r, text.g, text.b, int(text.a * 0.62))
     for key, box in self._targets.items():
       caption, value = ("VIEW", ANGLE_LABELS[selection.angle]) if key == "angle" else ("MODE", MODE_LABELS[selection.mode])
-      rl.draw_rectangle_rounded(box, 0.45, 12, rl.Color(0, 0, 0, 150))
-      rl.draw_rectangle_rounded_lines_ex(box, 0.45, 12, 3, rl.Color(255, 255, 255, 80))
-      self._text(font, caption, 30, box.x + box.width / 2, box.y + 26, rl.Color(255, 255, 255, 160))
-      self._text(font, value, 44, box.x + box.width / 2, box.y + 68, rl.WHITE)
+      rl.draw_rectangle_rounded(box, 0.45, 12, fill)
+      if border.a:
+        rl.draw_rectangle_rounded_lines_ex(box, 0.45, 12, 3, border)
+      self._text(font, caption, 30, box.x + box.width / 2, box.y + 26, caption_color)
+      self._text(font, value, 44, box.x + box.width / 2, box.y + 68, text)
 
   @staticmethod
   def _text(font, text: str, size: int, cx: float, cy: float, color) -> None:
+    if hasattr(font, "draw"):  # StarPilot BitmapFonts
+      from openpilot.starpilot.ui.presentation import FontRole
+      width = font.measure(text, FontRole.SEMI_BOLD, size).width
+      top, bottom = font.vertical_ink(text, FontRole.SEMI_BOLD, size)
+      font.draw(text, FontRole.SEMI_BOLD, size, cx - width / 2, cy - (top + bottom) / 2, color)
+      return
     measured = _measure(font, text, size)
     rl.draw_text_ex(font, text, rl.Vector2(cx - measured.x / 2, cy - measured.y / 2), size, 0, color)
 
+  def hide(self) -> None:
+    self._targets = {}
+
   def hit(self, x: float, y: float) -> str | None:
-    """'angle' or 'mode' for a tap at layer coordinates (x, y), else None."""
+    """'angle' or 'mode' for a tap at onroad coordinates (x, y), else None."""
     if time.monotonic() - self._drawn_at > STALE_AFTER:
       return None
     for key, box in self._targets.items():

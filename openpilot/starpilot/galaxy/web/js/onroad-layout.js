@@ -224,6 +224,17 @@ export const LayoutWidgetPreview = {
           :font-size="profile === 'large' ? 48 : 21" font-weight="600"
           style="filter: drop-shadow(2px 2px 1px #000000aa)">{{ clock24Hour ? '18:00' : '12:00 PM' }}</text>
       </template>
+      <g v-else-if="widget.kind === 'turn_signals'" fill="#35e06f" style="filter: drop-shadow(0 0 7px #35e06fcc)">
+        <path :transform="'translate(0 ' + (widget.height - 96) / 2 + ')'" d="M6 48 L50 8 L50 31 L98 31 L98 65 L50 65 L50 88 Z" />
+        <path :transform="'translate(' + widget.width + ' ' + (widget.height - 96) / 2 + ') scale(-1 1)'" d="M6 48 L50 8 L50 31 L98 31 L98 65 L50 65 L50 88 Z" />
+      </g>
+      <g v-else-if="widget.kind === 'scene_view_switcher'" text-anchor="middle" font-weight="600">
+        <template v-for="(button, index) in [['VIEW', 'Chase'], ['MODE', 'Synthetic']]" :key="index">
+          <rect x="1.5" :y="1.5 + index * 118" width="247" height="101" rx="46" :fill="palette.cardFill" :stroke="palette.cardBorder" stroke-width="3" />
+          <text x="125" :y="37 + index * 118" font-size="30" :fill="palette.text" fill-opacity=".62">{{ button[0] }}</text>
+          <text x="125" :y="84 + index * 118" font-size="44" :fill="palette.text">{{ button[1] }}</text>
+        </template>
+      </g>
       <g v-else-if="widget.kind === 'now_playing' && widget.size === 'big'">
         <defs><linearGradient id="gx-np-wash" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8a3a52" /><stop offset=".45" stop-color="#5a2350" /><stop offset="1" stop-color="#22143f" /></linearGradient></defs>
         <rect x="0" y="0" :width="widget.width" :height="widget.height" rx="40" fill="url(#gx-np-wash)" :fill-opacity="(widget.opacity ?? 85) / 100" />
